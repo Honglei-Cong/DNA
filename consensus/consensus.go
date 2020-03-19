@@ -25,6 +25,7 @@ import (
 	"github.com/DNAProject/DNA/account"
 	"github.com/DNAProject/DNA/common/log"
 	"github.com/DNAProject/DNA/consensus/dbft"
+	"github.com/DNAProject/DNA/consensus/poa"
 	"github.com/DNAProject/DNA/consensus/solo"
 	"github.com/DNAProject/DNA/consensus/vbft"
 	"github.com/ontio/ontology-eventbus/actor"
@@ -40,6 +41,7 @@ const (
 	CONSENSUS_DBFT = "dbft"
 	CONSENSUS_SOLO = "solo"
 	CONSENSUS_VBFT = "vbft"
+	CONSENSUS_POA  = "poa"
 )
 
 func NewConsensusService(consensusType string, account *account.Account, txpool *actor.PID, ledger *actor.PID, p2p *actor.PID) (ConsensusService, error) {
@@ -55,6 +57,8 @@ func NewConsensusService(consensusType string, account *account.Account, txpool 
 		consensus, err = solo.NewSoloService(account, txpool)
 	case CONSENSUS_VBFT:
 		consensus, err = vbft.NewVbftServer(account, txpool, p2p)
+	case CONSENSUS_POA:
+		consensus, err = poa.NewPoAServer(account, txpool, p2p)
 	}
 	log.Infof("ConsensusType:%s", consensusType)
 	return consensus, err
