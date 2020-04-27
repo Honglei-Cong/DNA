@@ -10,11 +10,13 @@ import (
 )
 
 type ConfigPool struct {
-	lock         sync.RWMutex
-	server       *Server
-	pool         *BlockPool
-	HistoryLen   int
-	ChainConfigs map[uint32]*vconfig.ChainConfig // indexed by chaincfg-update-blknum
+	lock       sync.RWMutex
+	server     *Server
+	pool       *BlockPool
+	historyLen int
+
+	epoches      map[uint32]uint32               // chaincfg-update-blk# -> epoch#
+	chainConfigs map[uint32]*vconfig.ChainConfig // epoch# -> chain config
 }
 
 func newConfigPool(server *Server, pool *BlockPool) (*ConfigPool, error) {
@@ -25,8 +27,9 @@ func newConfigPool(server *Server, pool *BlockPool) (*ConfigPool, error) {
 	cfgs := &ConfigPool{
 		server:       server,
 		pool:         pool,
-		HistoryLen:   16,
-		ChainConfigs: make(map[uint32]*vconfig.ChainConfig),
+		historyLen:   16,
+		epoches:      make(map[uint32]uint32),
+		chainConfigs: make(map[uint32]*vconfig.ChainConfig),
 	}
 
 	if err := cfgs.updateChainConfig(); err != nil {
@@ -35,34 +38,19 @@ func newConfigPool(server *Server, pool *BlockPool) (*ConfigPool, error) {
 	return cfgs, nil
 }
 
-// FIXME: get last-epoch chain config
 func (cfgs *ConfigPool) getChainConfig(blknum uint32) *vconfig.ChainConfig {
-	if blknum > cfgs.pool.getSealedBlockNum() {
+	epoch := cfgs._getEpoch(blknum)
+	if epoch == UNKNOWN_EPOCH {
 		return nil
 	}
 
 	cfgs.lock.RLock()
 	defer cfgs.lock.RUnlock()
 
-	lastEpochStart := uint32(0)
-	var lastEpochCfg *vconfig.ChainConfig
-	for epochStart, cfg := range cfgs.ChainConfigs {
-		if epochStart > blknum {
-			continue
-		}
-		if epochStart == blknum {
-			return cfg
-		}
-		if epochStart > lastEpochStart {
-			lastEpochStart = epochStart
-			lastEpochCfg = cfg
-		}
-	}
-
-	return lastEpochCfg
+	return cfgs.chainConfigs[epoch]
 }
 
-func (cfgs *ConfigPool) GetEpoch(blknum uint32) uint32 {
+func (cfgs *ConfigPool) _getEpoch(blknum uint32) uint32 {
 	if blknum > cfgs.pool.getSealedBlockNum() {
 		return UNKNOWN_EPOCH
 	}
@@ -71,21 +59,39 @@ func (cfgs *ConfigPool) GetEpoch(blknum uint32) uint32 {
 	defer cfgs.lock.RUnlock()
 
 	lastEpochStart := uint32(0)
-	lastEpoch := uint32(UNKNOWN_EPOCH)
-	for epochStart, cfg := range cfgs.ChainConfigs {
-		if epochStart > blknum {
-			continue
+	maxEpoch := uint32(0)
+	epoch := uint32(UNKNOWN_EPOCH)
+	for epStart, ep := range cfgs.epoches {
+		if epStart == blknum {
+			epoch = ep
+			break
+		} else if epStart > lastEpochStart {
+			lastEpochStart = epStart
+			epoch = ep
 		}
-		if epochStart == blknum {
-			return cfg.View
-		}
-		if epochStart > lastEpochStart {
-			lastEpochStart = epochStart
-			lastEpoch = cfg.View
+		if ep > maxEpoch {
+			maxEpoch = ep
 		}
 	}
 
-	return lastEpoch
+	if epoch == UNKNOWN_EPOCH {
+		// in latest epoch
+		// FIXME: getting epoch of block when its epoch-switching-block not finalized
+		if maxEpoch > 1 {
+			maxEpoch -= 1
+		}
+		return maxEpoch
+	}
+
+	if epoch <= 2 {
+		return 1
+	}
+	if epStart, present := cfgs.epoches[epoch-1]; present {
+		if blknum > epStart {
+			return epoch - 2
+		}
+	}
+	return UNKNOWN_EPOCH
 }
 
 func (cfgs *ConfigPool) updateChainConfig() error {
@@ -93,7 +99,7 @@ func (cfgs *ConfigPool) updateChainConfig() error {
 	defer cfgs.lock.Unlock()
 
 	startBlkNum := cfgs.pool.getSealedBlockNum()
-	for len(cfgs.ChainConfigs) < cfgs.HistoryLen+1 {  // +1 to make new-chainconfig accepted
+	for len(cfgs.chainConfigs) < cfgs.historyLen+1 { // +1 to make new-chainconfig accepted
 		// get block
 		blk, err := cfgs.pool.getSealedBlock(startBlkNum)
 		if err != nil {
@@ -109,7 +115,8 @@ func (cfgs *ConfigPool) updateChainConfig() error {
 		if blkInfo.NewChainConfig != nil {
 			// add config to pool
 			cfg := *blkInfo.NewChainConfig
-			cfgs.ChainConfigs[startBlkNum] = &cfg
+			cfgs.epoches[startBlkNum] = cfg.View
+			cfgs.chainConfigs[cfg.View] = &cfg
 
 			if startBlkNum == 0 {
 				break
@@ -117,7 +124,7 @@ func (cfgs *ConfigPool) updateChainConfig() error {
 			startBlkNum -= 1 // continue to previous epoch
 		} else {
 			// if lastConfigBlock has been in pool, stop looping
-			if _, present := cfgs.ChainConfigs[blkInfo.LastConfigBlockNum]; present {
+			if _, present := cfgs.epoches[blkInfo.LastConfigBlockNum]; present {
 				break
 			}
 			if blkInfo.LastConfigBlockNum == math.MaxUint32 {
@@ -128,32 +135,27 @@ func (cfgs *ConfigPool) updateChainConfig() error {
 	}
 
 	// if config-pool contains more than History-Len, remove old configs
-	for len(cfgs.ChainConfigs) > cfgs.HistoryLen {
+	for len(cfgs.chainConfigs) > cfgs.historyLen {
 		// remove oldest config
 		lowestCfgHeight := uint32(math.MaxUint32)
-		for h := range cfgs.ChainConfigs {
+		for h := range cfgs.epoches {
 			if h < lowestCfgHeight {
 				lowestCfgHeight = h
 			}
 		}
-		delete(cfgs.ChainConfigs, lowestCfgHeight)
+		epoch := cfgs.epoches[lowestCfgHeight]
+		delete(cfgs.chainConfigs, epoch)
+		delete(cfgs.epoches, lowestCfgHeight)
 	}
 
 	return nil
 }
 
 func (cfgs *ConfigPool) GetCurrentBlockDelay() time.Duration {
-	cfgs.lock.RLock()
-	defer cfgs.lock.RUnlock()
-
-	defaultDelay := time.Second * 10
-	epoch := uint32(0)
-	for ep, cfg := range cfgs.ChainConfigs {
-		if ep > epoch {
-			epoch = ep
-			defaultDelay = cfg.BlockMsgDelay
-		}
+	chaincfg := cfgs.getChainConfig(cfgs.pool.getSealedBlockNum())
+	if chaincfg != nil {
+		return chaincfg.BlockMsgDelay
 	}
 
-	return defaultDelay
+	return time.Second * 10 // DEFAULT BLOCK DELAY
 }
