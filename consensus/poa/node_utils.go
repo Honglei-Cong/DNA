@@ -31,6 +31,8 @@ import (
 	"github.com/DNAProject/DNA/core/signature"
 	"github.com/DNAProject/DNA/p2pserver/message/msg_pack"
 	p2pmsg "github.com/DNAProject/DNA/p2pserver/message/types"
+	"github.com/ontio/ontology-crypto/keypair"
+	"github.com/DNAProject/DNA/core/types"
 )
 
 func (self *Server) GetCommittedBlockNo() uint32 {
@@ -67,97 +69,10 @@ func (self *Server) isProposer(blockNum, view uint32, peerIdx uint32) bool {
 	return self.blockPool.isLeaderOf(blockNum, view, peerIdx)
 }
 
-func (self *Server) isEndorser(blockNum uint32, peerIdx uint32) bool {
-	self.metaLock.RLock()
-	defer self.metaLock.RUnlock()
-
-	// the first 2C+1 active endorsers
-	var activeN uint32
-	{
-		for _, id := range self.currentParticipantConfig.Endorsers {
-			if id == peerIdx {
-				return true
-			}
-			if self.isPeerActive(id, blockNum) {
-				activeN++
-				if activeN > self.config.C*2 {
-					break
-				}
-			}
-		}
-	}
-
-	return false
-}
-
-func (self *Server) isCommitter(blockNum uint32, peerIdx uint32) bool {
-	self.metaLock.RLock()
-	defer self.metaLock.RUnlock()
-
-	// the first 2C+1 active committers
-	var activeN uint32
-	{
-		for _, id := range self.currentParticipantConfig.Committers {
-			if id == peerIdx {
-				return true
-			}
-			if self.isPeerActive(id, blockNum) {
-				activeN++
-				if activeN > self.config.C*2 {
-					break
-				}
-			}
-		}
-	}
-
-	return false
-}
-
-func (self *Server) getProposerRankLocked(blockNum uint32, peerIdx uint32) int {
-	if blockNum == self.currentParticipantConfig.BlockNum {
-		for rank, id := range self.currentParticipantConfig.Proposers {
-			if id == peerIdx {
-				return rank
-			}
-		}
-	} else {
-		log.Errorf("todo: get proposer config for non-current blocknum:%d, current.BlockNum%d,peerIdx:%d", blockNum, self.currentParticipantConfig.BlockNum, peerIdx)
-	}
-	return len(self.currentParticipantConfig.Proposers)
-}
-
-func (self *Server) getHighestRankProposal(blockNum uint32, proposals []*blockProposalMsg) *blockProposalMsg {
-	self.metaLock.RLock()
-	defer self.metaLock.RUnlock()
-
-	proposerRank := 10000
-	var proposal *blockProposalMsg
-	for _, p := range proposals {
-		if p.GetBlockNum() != blockNum {
-			log.Errorf("server %d, diff blockNum found when get highest rank proposal,blockNum:%d", self.Index, blockNum)
-			continue
-		}
-
-		if r := self.getProposerRankLocked(blockNum, p.Block.getProposer()); r < proposerRank {
-			proposerRank = r
-			proposal = p
-		}
-	}
-
-	if proposal == nil && len(proposals) > 0 {
-		for _, p := range proposals {
-			log.Errorf("blk %d, proposer %d", p.Block.getBlockNum(), p.Block.getProposer())
-		}
-		panic("ERR")
-	}
-
-	return proposal
-}
-
 //
 //  call this method with metaLock locked
 //
-func (self *Server) buildParticipantConfig(blkNum uint32, lastBlk *Block, chainCfg *vconfig.ChainConfig) (*BlockParticipantConfig, error) {
+func (self *Server) buildParticipantConfig(blkNum uint32, lastBlk *types.Block, chainCfg *vconfig.ChainConfig) (*BlockParticipantConfig, error) {
 
 	if blkNum == 0 {
 		return nil, fmt.Errorf("not participant config for genesis block")
@@ -400,14 +315,34 @@ func (self *Server) GetProQuorum(blknum uint32) uint32 {
 	return 0
 }
 
+func (self *Server) GetPeerPublicKey(peerIdx uint32) keypair.PublicKey {
+	return nil
+}
+
 func (self *Server) GetQuorum(blknum uint32) uint32 {
 	chaincfg := self.GetChainConfig(blknum)
 	n := len(chaincfg.Peers)
 	return uint32(n - (n-1)/3)
 }
 
+func (self *Server) GetEpoch(blknum uint32) uint32 {
+	// TODO
+	return 0
+}
+
+// FIXME
 func (self *Server) GetCurrentBlockNo() uint32 {
 	return self.blockPool.getSealedBlockNum()+1
+}
+
+// FIXME
+func (self *Server) GetCurrentEpoch() uint32 {
+	return self.GetEpoch(self.GetCurrentBlockNo())
+}
+
+// FIXME
+func (self *Server) GetCurrentChainConfig() *vconfig.ChainConfig {
+	return self.GetChainConfig(self.GetCurrentBlockNo())
 }
 
 func (self *Server) canFastForward(targetBlkNum uint32) bool {

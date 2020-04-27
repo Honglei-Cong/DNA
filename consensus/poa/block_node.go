@@ -34,7 +34,6 @@ type BlockNode struct {
 
 	ParticipantConfig *BlockParticipantConfig
 	Proposal          *types.Block
-	Txs               map[common.Uint256]struct{}
 	ExecMerkleRoot    common.Uint256
 
 	// justifies
@@ -52,7 +51,6 @@ func newPoolNode(epoch, height, view uint32, prevHash, blockhash common.Uint256)
 		BlockHash:     blockhash,
 		PrevBlockHash: prevHash,
 		NodeState:     PENDING,
-		Txs:           make(map[common.Uint256]struct{}),
 		ChangeView:    make(map[uint32]*Vote),
 		Prepare:       make(map[uint32]*Vote),
 		Commit:        make(map[uint32]*Vote),

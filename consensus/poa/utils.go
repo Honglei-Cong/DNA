@@ -41,7 +41,6 @@ import (
 	nutils "github.com/DNAProject/DNA/smartcontract/service/native/utils"
 	"github.com/ontio/ontology-crypto/keypair"
 	"github.com/ontio/ontology-crypto/vrf"
-	"math"
 )
 
 func SignMsg(account *account.Account, msg ConsensusMsg) ([]byte, error) {
@@ -95,12 +94,14 @@ func getParticipantSelectionSeed(block *Block) vconfig.VRFValue {
 
 type vrfData struct {
 	BlockNum uint32 `json:"block_num"`
+	View     uint32 `json:"view"`
 	PrevVrf  []byte `json:"prev_vrf"`
 }
 
-func computeVrf(sk keypair.PrivateKey, blkNum uint32, prevVrf []byte) ([]byte, []byte, error) {
+func computeVrf(sk keypair.PrivateKey, blkNum, view uint32, prevVrf []byte) ([]byte, []byte, error) {
 	data, err := json.Marshal(&vrfData{
 		BlockNum: blkNum,
+		View:     view,
 		PrevVrf:  prevVrf,
 	})
 	if err != nil {
@@ -110,9 +111,10 @@ func computeVrf(sk keypair.PrivateKey, blkNum uint32, prevVrf []byte) ([]byte, [
 	return vrf.Vrf(sk, data)
 }
 
-func verifyVrf(pk keypair.PublicKey, blkNum uint32, prevVrf, newVrf, proof []byte) error {
+func verifyVrf(pk keypair.PublicKey, blkNum, view uint32, prevVrf, newVrf, proof []byte) error {
 	data, err := json.Marshal(&vrfData{
 		BlockNum: blkNum,
+		View:     view,
 		PrevVrf:  prevVrf,
 	})
 	if err != nil {

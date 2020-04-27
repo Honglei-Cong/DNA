@@ -69,6 +69,11 @@ const (
 	CAP_ROUNDS_IN_VOTE   = 16
 )
 
+const (
+	UNKNOWN_VIEW = math.MaxUint32
+	UNKNOWN_EPOCH = math.MaxUint32
+)
+
 type BftAction struct {
 	Type     BftActionType
 	BlockNum uint32
@@ -850,15 +855,13 @@ func (self *Server) processRoundVoteMsg(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) processNewView(msg *RoundVoteMsg) error {
-	// if new-view reached QC
 	if self.blockPool.getActiveView(msg.Height) >= msg.View {
 		return nil
 	}
-	if err := self.blockPool.processNewView(msg.Height, msg.View); err != nil {
-		return fmt.Errorf("activate view (%d,%d) failed: %s", msg.Height, msg.View, err)
-	}
 
+	self.blockPool.processNewView(msg.Height, msg.View)
 	if self.blockPool.getActiveView(msg.Height) > msg.View {
+		// if new-view reached QC
 		v := msg.View+1
 		if self.blockPool.isLeaderOf(msg.Height, v, self.Index) {
 			if self.blockPool.isProposalReady(msg.Height, v) {
@@ -882,6 +885,7 @@ func (self *Server) processExecMerkle(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) processCommit(msg *RoundVoteMsg) error {
+	// TODO: check if vote is in same fork with server
 	if self.blockPool.getSealedBlockNum() >= msg.Height {
 		return nil
 	}
@@ -892,6 +896,7 @@ func (self *Server) processCommit(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) processPrepare(msg *RoundVoteMsg) error {
+	// TODO: check if vote is in same fork with server
 	if err := self.blockPool.processPrepare(msg.Height, msg.View); err != nil {
 		return fmt.Errorf("new prepare (%d,%d) failed: %s", msg.Height, msg.View, err)
 	}
@@ -899,6 +904,7 @@ func (self *Server) processPrepare(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) processPropose(msg *RoundVoteMsg) error {
+	// TODO: check if vote is in same fork with server
 	if err := self.blockPool.processProposal(msg.Height, msg.View); err != nil {
 		return fmt.Errorf("new proposal (%d,%d) failed: %s", msg.Height, msg.View, err)
 	}
@@ -906,11 +912,12 @@ func (self *Server) processPropose(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) responseVoteMsg(msg *VoteMsg) error {
+	// TODO
 	return nil
 }
 
 func (self *Server) processViewMsg(msg *ChangeViewMsg) error {
-
+	// TODO
 	return nil
 }
 
@@ -933,6 +940,7 @@ func (self *Server) startNewRound() error {
 }
 
 func (self *Server) responseViewMsg(msg *ChangeViewMsg) error {
+	// TODO
 	return nil
 }
 
@@ -1264,7 +1272,7 @@ func (self *Server) processHandshakeMsg(peerIdx uint32, msg *peerHandshakeMsg) e
 		peerState: &PeerState{
 			peerIdx:            peerIdx,
 			connected:          true,
-			chainConfigView:    msg.ChainConfig.View,
+			chainConfigEpoch:   msg.ChainConfig.View,
 			committedBlockNum:  msg.CommittedBlockNumber,
 			committedBlockHash: msg.CommittedBlockHash,
 		},
@@ -1282,7 +1290,7 @@ func (self *Server) processHeartbeatMsg(peerIdx uint32, msg *peerHeartbeatMsg) {
 		peerState: &PeerState{
 			peerIdx:            peerIdx,
 			connected:          true,
-			chainConfigView:    msg.ChainConfigView,
+			chainConfigEpoch:   msg.ChainConfigView,
 			committedBlockNum:  msg.CommittedBlockNumber,
 			committedBlockHash: msg.CommittedBlockHash,
 		},
@@ -1428,27 +1436,22 @@ func (self *Server) sealProposal(blknum, view uint32) error {
 	return nil
 }
 
-func (self *Server) fastForwardBlock(block *Block) error {
+func (self *Server) fastForwardBlock(block *types.Block) error {
 
 	// TODO: update chainconfig when forwarding
 
 	if isActive(self.getState()) {
 		return fmt.Errorf("server %d: invalid fastforward, current state: %d", self.Index, self.getState())
 	}
-	if self.blockPool.getSealedBlockNum() >= block.getBlockNum() {
+	if self.blockPool.getSealedBlockNum() >= block.Header.Height {
 		return nil
 	}
-	if self.blockPool.getSealedBlockNum()+1 == block.getBlockNum() {
-		// block from peer syncer, there should only one candidate block
-		flag := false
-		if len(block.Block.Header.SigData) <= 1 {
-			flag = true
-		}
+	if self.blockPool.getSealedBlockNum()+1 == block.Header.Height {
 		// FIXME:
-		return self.sealBlock(block, false, flag)
+		return self.sealBlock(block.Header.Height, UNKNOWN_VIEW)
 	}
 	return fmt.Errorf("server %d: fastforward blk %d failed, current blkNum: %d",
-		self.Index, block.getBlockNum(), self.blockPool.getSealedBlockNum())
+		self.Index, block.Header.Height, self.blockPool.getSealedBlockNum())
 }
 
 func (self *Server) msgSendLoop() {

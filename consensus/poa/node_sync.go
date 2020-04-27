@@ -29,6 +29,7 @@ import (
 	"github.com/DNAProject/DNA/common"
 	"github.com/DNAProject/DNA/common/log"
 	"github.com/DNAProject/DNA/core/ledger"
+	"github.com/DNAProject/DNA/core/types"
 )
 
 type SyncCheckReq struct {
@@ -61,10 +62,10 @@ type SyncMsg struct {
 
 type BlockMsgFromPeer struct {
 	fromPeer uint32
-	block    *Block
+	block    *types.Block
 }
 
-type BlockFromPeers map[uint32]*Block // index by peerId
+type BlockFromPeers map[uint32]*types.Block // index by peerId
 
 type Syncer struct {
 	lock   sync.Mutex
@@ -164,13 +165,13 @@ func (self *Syncer) run() {
 			}
 
 		case blkMsgFromPeer := <-self.blockFromPeerC:
-			blkNum := blkMsgFromPeer.block.getBlockNum()
+			blkNum := blkMsgFromPeer.block.Header.Height
 			if blkNum < self.nextReqBlkNum {
 				continue
 			}
 
-			log.Infof("server %d, next: %d, target: %d,  from syncer %d, blk %d, proposer %d",
-				self.server.Index, self.nextReqBlkNum, self.targetBlkNum, blkMsgFromPeer.fromPeer, blkNum, blkMsgFromPeer.block.getProposer())
+			log.Infof("server %d, next: %d, target: %d,  from syncer %d, blk %d",
+				self.server.Index, self.nextReqBlkNum, self.targetBlkNum, blkMsgFromPeer.fromPeer, blkNum)
 			if _, present := self.pendingBlocks[blkNum]; !present {
 				self.pendingBlocks[blkNum] = make(BlockFromPeers)
 			}
@@ -181,7 +182,7 @@ func (self *Syncer) run() {
 			}
 			for self.nextReqBlkNum <= self.targetBlkNum {
 				// FIXME: compete with ledger syncing
-				var blk *Block
+				var blk *types.Block
 				if self.nextReqBlkNum <= ledger.DefLedger.GetCurrentBlockHeight() {
 					blk, _ = self.server.blockPool.getSealedBlock(self.nextReqBlkNum)
 				}
@@ -207,9 +208,9 @@ func (self *Syncer) run() {
 				if blk == nil {
 					break
 				}
-				prevHash := blk.getPrevBlockHash()
-				log.Debugf("server %d syncer, sealed block %d, proposer %d, prevhash: %s",
-					self.server.Index, self.nextReqBlkNum, blk.getProposer(), prevHash.ToHexString())
+				prevHash := blk.Header.PrevBlockHash
+				log.Debugf("server %d syncer, sealed block %d, prevhash: %s",
+					self.server.Index, self.nextReqBlkNum, prevHash.ToHexString())
 				if err := self.server.fastForwardBlock(blk); err != nil {
 					log.Errorf("server %d syncer, fastforward block %d failed %s",
 						self.server.Index, self.nextReqBlkNum, err)
@@ -241,7 +242,7 @@ func (self *Syncer) run() {
 	}
 }
 
-func (self *Syncer) blockConsensusDone(blks BlockFromPeers) *Block {
+func (self *Syncer) blockConsensusDone(blks BlockFromPeers) *types.Block {
 	// TODO: also check blockhash
 	proposers := make(map[uint32]int)
 	for _, blk := range blks {
@@ -269,7 +270,7 @@ func (self *Syncer) getCurrentTargetBlockNum() uint32 {
 	}
 	return targetBlkNum
 }
-func (self *Syncer) blockCheckMerkleRoot(blks BlockFromPeers) *Block {
+func (self *Syncer) blockCheckMerkleRoot(blks BlockFromPeers) *types.Block {
 	merkleRoot := make(map[common.Uint256]int)
 	for _, blk := range blks {
 		merkleRoot[blk.getPrevBlockMerkleRoot()] += 1
@@ -405,7 +406,7 @@ func (self *PeerSyncer) run() {
 			return
 		}
 
-		var proposalBlock *Block
+		var proposalBlock *types.Block
 		proposalBlock, _ = self.server.blockPool.getSealedBlock(blkNum)
 		if proposalBlock == nil {
 			if proposalBlock, err = self.requestBlock(blkNum); err != nil {
@@ -433,7 +434,7 @@ func (self *PeerSyncer) stop(force bool) bool {
 	return false
 }
 
-func (self *PeerSyncer) requestBlock(blkNum uint32) (*Block, error) {
+func (self *PeerSyncer) requestBlock(blkNum uint32) (*types.Block, error) {
 	msg := self.server.constructBlockFetchMsg(blkNum)
 	self.server.msgSendC <- &SendMsgEvent{
 		ToPeer: self.peerIdx,
@@ -496,7 +497,7 @@ func (self *PeerSyncer) requestBlockInfo(startBlkNum uint32) ([]*BlockInfo_, err
 	return nil, nil
 }
 
-func (self *PeerSyncer) fetchedBlock(blkNum uint32, block *Block) error {
+func (self *PeerSyncer) fetchedBlock(blkNum uint32, block *types.Block) error {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 

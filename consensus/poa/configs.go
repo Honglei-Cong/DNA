@@ -6,12 +6,14 @@ import (
 	"github.com/DNAProject/DNA/consensus/vbft/config"
 	"math"
 	"sync"
+	"time"
 )
 
 type ConfigPool struct {
 	lock         sync.RWMutex
 	server       *Server
 	pool         *BlockPool
+	HistoryLen   int
 	ChainConfigs map[uint32]*vconfig.ChainConfig // indexed by chaincfg-update-blknum
 }
 
@@ -23,6 +25,7 @@ func newConfigPool(server *Server, pool *BlockPool) (*ConfigPool, error) {
 	cfgs := &ConfigPool{
 		server:       server,
 		pool:         pool,
+		HistoryLen:   16,
 		ChainConfigs: make(map[uint32]*vconfig.ChainConfig),
 	}
 
@@ -59,43 +62,98 @@ func (cfgs *ConfigPool) getChainConfig(blknum uint32) *vconfig.ChainConfig {
 	return lastEpochCfg
 }
 
+func (cfgs *ConfigPool) GetEpoch(blknum uint32) uint32 {
+	if blknum > cfgs.pool.getSealedBlockNum() {
+		return UNKNOWN_EPOCH
+	}
+
+	cfgs.lock.RLock()
+	defer cfgs.lock.RUnlock()
+
+	lastEpochStart := uint32(0)
+	lastEpoch := uint32(UNKNOWN_EPOCH)
+	for epochStart, cfg := range cfgs.ChainConfigs {
+		if epochStart > blknum {
+			continue
+		}
+		if epochStart == blknum {
+			return cfg.View
+		}
+		if epochStart > lastEpochStart {
+			lastEpochStart = epochStart
+			lastEpoch = cfg.View
+		}
+	}
+
+	return lastEpoch
+}
+
 func (cfgs *ConfigPool) updateChainConfig() error {
 	cfgs.lock.Lock()
 	defer cfgs.lock.Unlock()
 
-	cfgBlkNum := cfgs.pool.getSealedBlockNum()
-	blk, err := cfgs.pool.getSealedBlock(cfgBlkNum)
-	if err != nil {
-		return fmt.Errorf("failed to sealed block, height: %d: %s", cfgBlkNum, err)
-	}
-
-	blkInfo := &vconfig.VbftBlockInfo{}
-	if err := json.Unmarshal(blk.Header.ConsensusPayload, blkInfo); err != nil {
-		return fmt.Errorf("failed to parse blockinfo, height: %d: %s", cfgBlkNum, err)
-	}
-
-	if blkInfo.NewChainConfig == nil {
-		if _, present := cfgs.ChainConfigs[blkInfo.LastConfigBlockNum]; present {
-			return nil
+	startBlkNum := cfgs.pool.getSealedBlockNum()
+	for len(cfgs.ChainConfigs) < cfgs.HistoryLen+1 {  // +1 to make new-chainconfig accepted
+		// get block
+		blk, err := cfgs.pool.getSealedBlock(startBlkNum)
+		if err != nil {
+			return fmt.Errorf("failed to sealed block, height: %d: %s", startBlkNum, err)
 		}
-		if blkInfo.LastConfigBlockNum != math.MaxUint32 {
-			// load last-config-block
-			blk, err := cfgs.pool.getSealedBlock(blkInfo.LastConfigBlockNum)
-			if err != nil {
-				return fmt.Errorf("failed to load config block %d: %s", blkInfo.LastConfigBlockNum, err)
+
+		// parse consensus payload
+		blkInfo := &vconfig.VbftBlockInfo{}
+		if err := json.Unmarshal(blk.Header.ConsensusPayload, blkInfo); err != nil {
+			return fmt.Errorf("failed to parse blockinfo, height: %d: %s", startBlkNum, err)
+		}
+
+		if blkInfo.NewChainConfig != nil {
+			// add config to pool
+			cfg := *blkInfo.NewChainConfig
+			cfgs.ChainConfigs[startBlkNum] = &cfg
+
+			if startBlkNum == 0 {
+				break
 			}
-			// parse consensus-data of last-config-lock
-			if err := json.Unmarshal(blk.Header.ConsensusPayload, blkInfo); err != nil {
-				return fmt.Errorf("failed to parse lastconfig blockinfo, height: %d: %s", blkInfo.LastConfigBlockNum, err)
+			startBlkNum -= 1 // continue to previous epoch
+		} else {
+			// if lastConfigBlock has been in pool, stop looping
+			if _, present := cfgs.ChainConfigs[blkInfo.LastConfigBlockNum]; present {
+				break
 			}
+			if blkInfo.LastConfigBlockNum == math.MaxUint32 {
+				break
+			}
+			startBlkNum = blkInfo.LastConfigBlockNum
 		}
-		if blkInfo.NewChainConfig == nil {
-			return nil
-		}
-		cfgBlkNum = blkInfo.LastConfigBlockNum
 	}
 
-	cfg := *blkInfo.NewChainConfig
-	cfgs.ChainConfigs[cfgBlkNum] = &cfg
+	// if config-pool contains more than History-Len, remove old configs
+	for len(cfgs.ChainConfigs) > cfgs.HistoryLen {
+		// remove oldest config
+		lowestCfgHeight := uint32(math.MaxUint32)
+		for h := range cfgs.ChainConfigs {
+			if h < lowestCfgHeight {
+				lowestCfgHeight = h
+			}
+		}
+		delete(cfgs.ChainConfigs, lowestCfgHeight)
+	}
+
 	return nil
+}
+
+func (cfgs *ConfigPool) GetCurrentBlockDelay() time.Duration {
+	cfgs.lock.RLock()
+	defer cfgs.lock.RUnlock()
+
+	defaultDelay := time.Second * 10
+	epoch := uint32(0)
+	for ep, cfg := range cfgs.ChainConfigs {
+		if ep > epoch {
+			epoch = ep
+			defaultDelay = cfg.BlockMsgDelay
+		}
+	}
+
+	return defaultDelay
 }

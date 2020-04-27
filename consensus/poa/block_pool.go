@@ -110,10 +110,15 @@ func (pool *BlockPool) validateVoteMsg(msg *VoteMsg) error {
 		return fmt.Errorf("vote msg without roundvote")
 	}
 
-	// proposal msg is only at the tail
-	for i := 0; i < len(msg.Rounds)-1; i++ {
-		if msg.Rounds[i].Proposal != nil {
+	// validate: proposal msg is only at the tail
+	// validate: epoch# in VoteMsg
+	for idx, vote := range msg.Rounds {
+		if idx != len(msg.Rounds)-1 && vote.Proposal != nil {
 			return fmt.Errorf("proposal contained in non-tailed round vote")
+		}
+		epoch := pool.server.GetEpoch(vote.Height)
+		if vote.Epoch != epoch {
+			return fmt.Errorf("unmatch epoch in round vote (%d,%d), %d vs %d", vote.Height, vote.View, vote.Epoch, epoch)
 		}
 	}
 
@@ -224,8 +229,8 @@ func (pool *BlockPool) addVoteLocked(peerFrom uint32, subchain []*BlockNode, vot
 			if !node.isLeader(peerFrom) {
 				return fmt.Errorf("proposal (%d,%d) from invalid leader %d", node.Height, node.View, peerFrom)
 			}
-			node.Proposal = msg.Proposal.Block
-			// TODO: update txs
+			node.addProposal(msg.Proposal.Block)
+			// TODO: update txs when processing proposal
 		}
 	}
 	return nil
@@ -270,7 +275,7 @@ func (pool *BlockPool) getSubChainRLocked(msg *VoteMsg) ([]*BlockNode, error) {
 		for _, r := range msg.Rounds {
 			if r.BlockHash == blkHash {
 				n := newPoolNode(r.Epoch, r.Height, r.View, r.PrevBlockHash, r.BlockHash)
-				if _, err := pool.updateParticipantConfigLocked(n); err != nil {
+				if err := pool.updateParticipantConfigLocked(n); err != nil {
 					return nil, fmt.Errorf("failed to update block (%d,%d) participant config: %s", r.Height, r.View, err)
 				}
 				nodesInMsg = append(nodesInMsg, n)
@@ -562,49 +567,47 @@ type VrfSeedData struct {
 	VrfValue []byte `json:"vrf_value"`
 }
 
-func getBlockVrfValue(block *types.Block) ([]byte, error) {
+func getBlockVrfValue(block *types.Block) ([]byte, []byte, error) {
 	if block == nil {
-		return nil, fmt.Errorf("nil block in getBlockVrfValue")
+		return nil, nil, fmt.Errorf("nil block in getBlockVrfValue")
 	}
 
 	blkInfo := vconfig.VbftBlockInfo{}
 	if err := json.Unmarshal(block.Header.ConsensusPayload, blkInfo); err != nil {
-		return nil, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
+		return nil, nil, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
 	}
-	return blkInfo.VrfValue, nil
+	return blkInfo.VrfValue, blkInfo.VrfProof, nil
 }
+
 
 func (pool *BlockPool) GetParticipantConfig(height, view uint32) (*BlockParticipantConfig, error) {
 	pool.lock.RLock()
 	defer pool.lock.RUnlock()
 
-	var node *BlockNode
-	for _, n := range pool.candidateBlocks[height] {
-		if n.View == view {
-			if n.ParticipantConfig != nil {
-				pool.lock.RUnlock()
-				return n.ParticipantConfig, nil
-			}
-			node = n
-			break
-		}
-	}
+	node := pool.getBlockNodeLocked(height, view)
 	if node == nil {
 		// not find blockNode
 		return nil, fmt.Errorf("no blocknode for (%d,%d)", height, view)
 	}
+	if node.ParticipantConfig != nil {
+		return node.ParticipantConfig, nil
+	}
 
-	return pool.updateParticipantConfigLocked(node)
+	if err := pool.updateParticipantConfigLocked(node); err != nil {
+		return nil, err
+	}
+
+	return node.ParticipantConfig, nil
 }
 
-func (pool *BlockPool) updateParticipantConfigLocked(node *BlockNode) (*BlockParticipantConfig, error) {
+func (pool *BlockPool) updateParticipantConfigLocked(node *BlockNode) error {
 	height, view := node.Height, node.View
 
 	// get VrfValue of parent block
 	parentBlock := pool.getPrevProposalLocked(height, view)
-	parentBlockVrf, err := getBlockVrfValue(parentBlock)
+	parentBlockVrf, _, err := getBlockVrfValue(parentBlock)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get parent block (%d,%d) vrf: %s", height, view, err)
+		return fmt.Errorf("failed to get parent block (%d,%d) vrf: %s", height, view, err)
 	}
 
 	// get vrf value
@@ -621,11 +624,11 @@ func (pool *BlockPool) updateParticipantConfigLocked(node *BlockNode) (*BlockPar
 	// construct ParticipantConfig
 	chaincfg := pool.server.GetChainConfig(height)
 	if chaincfg == nil {
-		return nil, fmt.Errorf("failed to get chainconfig of block (%d,%d)", height, view)
+		return fmt.Errorf("failed to get chainconfig of block (%d,%d)", height, view)
 	}
 	leader, proactors := getParticipantPeers(v, chaincfg)
 
-	participantCfg := &BlockParticipantConfig{
+	node.ParticipantConfig = &BlockParticipantConfig{
 		BlockNum:    height,
 		VrfSeed:     v,
 		ChainConfig: chaincfg, // FIXME: copy
@@ -633,17 +636,7 @@ func (pool *BlockPool) updateParticipantConfigLocked(node *BlockNode) (*BlockPar
 		Proactors:   proactors,
 	}
 
-	// add participant config to blocknode
-	// FIXME: wlock here?
-	for _, n := range pool.candidateBlocks[height] {
-		if n.View == view {
-			if n.ParticipantConfig != nil {
-				n.ParticipantConfig = participantCfg
-			}
-			break
-		}
-	}
-	return participantCfg, nil
+	return nil
 }
 
 func getParticipantPeers(vrf vconfig.VRFValue, chainCfg *vconfig.ChainConfig) (uint32, []uint32) {
@@ -849,4 +842,25 @@ func (pool *BlockPool) getBlockNodeLocked(height, view uint32) *BlockNode {
 		}
 	}
 	return nil
+}
+
+func (pool *BlockPool) getPendingTxLocked(node *BlockNode) (map[common.Uint256]bool, error) {
+	pendingTxs := make(map[common.Uint256]bool)
+
+	startHeight := pool.getChainedBlockNumber()
+	for h := node.Height-1; h > startHeight; h-- {
+		if node.Proposal == nil {
+			return nil, fmt.Errorf("failed to get proposal in blocknode (%d)", h)
+		}
+		prevHash := node.Proposal.Header.PrevBlockHash
+		node = pool.nodePool[prevHash]
+		if node == nil {
+			return nil, fmt.Errorf("failed to get blocknode (%d): %s", h-1, prevHash.ToHexString())
+		}
+		for _, tx := range node.Proposal.Transactions {
+			pendingTxs[tx.Hash()] = true
+		}
+	}
+
+	return pendingTxs, nil
 }

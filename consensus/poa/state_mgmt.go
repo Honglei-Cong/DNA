@@ -74,7 +74,7 @@ type StateEvent struct {
 
 type PeerState struct {
 	peerIdx            uint32
-	chainConfigView    uint32
+	chainConfigEpoch   uint32
 	committedBlockNum  uint32
 	committedBlockHash common.Uint256
 	// todo: add justfiy
@@ -96,7 +96,7 @@ type StateMgr struct {
 func newStateMgr(server *Server) *StateMgr {
 	return &StateMgr{
 		server:           server,
-		syncReadyTimeout: server.config.BlockMsgDelay,
+		syncReadyTimeout: server.configPool.GetCurrentBlockDelay(),
 		currentState:     Init,
 		StateEventC:      make(chan *StateEvent, 16),
 		peers:            make(map[uint32]*PeerState),
@@ -140,11 +140,12 @@ func (self *StateMgr) run() {
 				self.peers[peerIdx] = evt.peerState
 
 				if self.currentState >= LocalConfigured {
-					v := self.getSyncedChainConfigView()
-					if v == self.server.config.View && self.currentState < Syncing {
+					peerEpoch := self.getSyncedChainConfigEpoch()
+					currentEpoch := self.server.GetEpoch(self.server.GetCurrentBlockNo())
+					if peerEpoch == currentEpoch && self.currentState < Syncing {
 						log.Infof("server %d, start syncing", self.server.Index)
 						self.currentState = Syncing
-					} else if v > self.server.config.View {
+					} else if peerEpoch > currentEpoch {
 						// update ChainConfig
 						log.Errorf("todo: chain config changed, need update chain config from peers")
 						// TODO: fetch config from neighbours, update chain config
@@ -201,11 +202,12 @@ func (self *StateMgr) onPeerUpdate(peerState *PeerState) {
 
 	switch self.currentState {
 	case LocalConfigured:
-		v := self.getSyncedChainConfigView()
+		v := self.getSyncedChainConfigEpoch()
+		currentEpoch := self.server.GetEpoch(self.server.GetCurrentBlockNo())
 		log.Infof("server %d statemgr update, current state: %d, from peer: %d, peercnt: %d, v1: %d, v2: %d",
-			self.server.Index, self.currentState, peerIdx, len(self.peers), v, self.server.config.View)
+			self.server.Index, self.currentState, peerIdx, len(self.peers), v, currentEpoch)
 
-		if v == self.server.config.View {
+		if v == currentEpoch {
 			self.currentState = Syncing
 		}
 	case Configured:
@@ -321,17 +323,17 @@ func (self *StateMgr) getMinActivePeerCount() int {
 	return n
 }
 
-func (self *StateMgr) getSyncedChainConfigView() uint32 {
+func (self *StateMgr) getSyncedChainConfigEpoch() uint32 {
 	if len(self.peers) < self.getMinActivePeerCount() {
 		return 0
 	}
 
-	views := make(map[uint32]int)
+	epoches := make(map[uint32]int)
 	for _, p := range self.peers {
-		views[p.chainConfigView] += 1
+		epoches[p.chainConfigEpoch] += 1
 	}
 
-	for k, v := range views {
+	for k, v := range epoches {
 		if v >= self.getMinActivePeerCount() {
 			return k
 		}
