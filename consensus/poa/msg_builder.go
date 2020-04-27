@@ -139,13 +139,17 @@ func (self *Server) constructHandshakeMsg() (*peerHandshakeMsg, error) {
 	if block == nil {
 		return nil, fmt.Errorf("failed to get sealed block, current chained block: %d", blkNum)
 	}
-	msg := &peerHandshakeMsg{
-		CommittedBlockNumber: blkNum,
-		CommittedBlockHash:   block.Hash(),
-		ChainConfig:          self.config,
+
+	chaincfg := self.configPool.getChainConfig(blkNum)
+	if chaincfg != nil {
+		return &peerHandshakeMsg{
+			CommittedBlockNumber: blkNum,
+			CommittedBlockHash:   block.Hash(),
+			ChainConfig:          chaincfg,
+		}, nil
 	}
 
-	return msg, nil
+	return nil, fmt.Errorf("constructing handshake msg, failed to get chainconfig (%d)", blkNum)
 }
 
 func (self *Server) constructHeartbeatMsg() (*peerHeartbeatMsg, error) {
@@ -156,13 +160,16 @@ func (self *Server) constructHeartbeatMsg() (*peerHeartbeatMsg, error) {
 		return nil, fmt.Errorf("failed to get sealed block, current chained block: %d", blkNum)
 	}
 
-	msg := &peerHeartbeatMsg{
-		CommittedBlockNumber: blkNum,
-		CommittedBlockHash:   block.Hash(),
-		ChainConfigView:      self.config.View,
+	chaincfg := self.configPool.getChainConfig(blkNum)
+	if chaincfg != nil {
+		return &peerHeartbeatMsg{
+			CommittedBlockNumber: blkNum,
+			CommittedBlockHash:   block.Hash(),
+			Epoch:                chaincfg.View,
+		}, nil
 	}
 
-	return msg, nil
+	return nil, fmt.Errorf("constructing heartbeat, failed to get chainconfig (%d)", blkNum)
 }
 
 func (self *Server) constructBlock(blkNum uint32, prevBlkHash common.Uint256, txs []*types.Transaction, consensusPayload []byte, blocktimestamp uint32) (*types.Block, error) {
@@ -219,7 +226,7 @@ func (self *Server) constructProposalMsg(blkNum, view uint32, sysTxs, userTxs []
 		blocktimestamp = prevBlk.Header.Timestamp + 1
 	}
 
-	vrfValue, vrfProof, err := computeVrf(self.account.PrivateKey, blkNum, vbftInfo.VrfValue)
+	vrfValue, vrfProof, err := computeVrf(self.account.PrivateKey, blkNum, view, vbftInfo.VrfValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get vrf and proof: %s", err)
 	}

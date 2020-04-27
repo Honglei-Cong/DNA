@@ -1284,13 +1284,13 @@ func (self *Server) processHandshakeMsg(peerIdx uint32, msg *peerHandshakeMsg) e
 func (self *Server) processHeartbeatMsg(peerIdx uint32, msg *peerHeartbeatMsg) {
 	self.peerPool.peerHeartbeat(peerIdx, msg)
 	log.Debugf("server %d received heartbeat from peer %d, chainview %d, blkNum %d",
-		self.Index, peerIdx, msg.ChainConfigView, msg.CommittedBlockNumber)
+		self.Index, peerIdx, msg.Epoch, msg.CommittedBlockNumber)
 	self.stateMgr.StateEventC <- &StateEvent{
 		Type: UpdatePeerState,
 		peerState: &PeerState{
 			peerIdx:            peerIdx,
 			connected:          true,
-			chainConfigEpoch:   msg.ChainConfigView,
+			chainConfigEpoch:   msg.Epoch,
 			committedBlockNum:  msg.CommittedBlockNumber,
 			committedBlockHash: msg.CommittedBlockHash,
 		},

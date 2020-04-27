@@ -517,7 +517,7 @@ func (msg *peerHandshakeMsg) Deserialize(source *common.ZeroCopySource) error {
 type peerHeartbeatMsg struct {
 	CommittedBlockNumber uint32         `json:"committed_block_number"`
 	CommittedBlockHash   common.Uint256 `json:"committed_block_hash"`
-	ChainConfigView      uint32         `json:"chain_config_view"`
+	Epoch                uint32         `json:"epoch"`
 }
 
 func (msg *peerHeartbeatMsg) Type() MsgType {
