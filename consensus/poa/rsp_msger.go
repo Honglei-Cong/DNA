@@ -1,16 +1,19 @@
 package poa
 
-import "sync"
+import (
+	"math"
+	"sync"
+)
 
 type RoundRspMsg struct {
-	msgs map[uint32][]SubMsg
+	msgs map[uint32][]SubMsg // view -> []msg
 }
 
 type ResponseMsgPool struct {
 	lock       sync.RWMutex
 	server     *Server
 	historyLen uint32
-	msgs       map[uint32]*RoundRspMsg
+	msgs       map[uint32]*RoundRspMsg // height -> RoundRsp
 }
 
 func newResponseMsgPool(server *Server, historyLen uint32) *ResponseMsgPool {
@@ -52,13 +55,35 @@ func (pool *ResponseMsgPool) removeMsgs(blknum, view uint32) {
 	delete(roundmsgs.msgs, view)
 }
 
-func (pool *ResponseMsgPool) getMgs(blknum, view uint32) []SubMsg {
+func (pool *ResponseMsgPool) getRoundResponse(blknum uint32) *RoundRspMsg {
 	pool.lock.RLock()
 	defer pool.lock.RUnlock()
 
 	if _, present := pool.msgs[blknum]; !present {
 		return nil
 	}
-	roundmsgs := pool.msgs[blknum]
-	return roundmsgs.msgs[view]
+	return pool.msgs[blknum]
+}
+
+func (pool *ResponseMsgPool) getFirstResponseHeight() uint32 {
+	pool.lock.RLock()
+	defer pool.lock.RUnlock()
+
+	height := uint32(math.MaxUint32)
+	for h := range pool.msgs {
+		if h < height {
+			height = h
+		}
+	}
+
+	return height
+}
+
+func (pool *ResponseMsgPool) popAllMsgs() map[uint32]*RoundRspMsg {
+	pool.lock.Lock()
+	defer pool.lock.Unlock()
+
+	msgs := pool.msgs
+	pool.msgs = make(map[uint32]*RoundRspMsg)
+	return msgs
 }

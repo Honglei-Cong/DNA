@@ -373,3 +373,91 @@ func (self *Server) constructBlockSubmitMsg(blkNum uint32, stateRoot common.Uint
 	}
 	return msg, nil
 }
+
+func (self *Server) constructRoundVoteMsg(blknum uint32, msg *RoundRspMsg) (*RoundVoteMsg, error) {
+	// get highest view
+	vw := uint32(0)
+	for v := range msg.msgs {
+		if v >= vw {
+			vw = v
+		}
+	}
+	if len(msg.msgs[vw]) == 0 {
+		return nil, nil
+	}
+
+	// get epoch
+	chaincfg := self.configPool.getChainConfig(blknum)
+	if chaincfg == nil {
+		return nil, fmt.Errorf("failed to get chainconfig when constructing roundvote %d", blknum)
+	}
+	roundVote := &RoundVoteMsg{
+		Epoch:  chaincfg.View,
+		Height: blknum,
+		View:   vw,
+	}
+
+	// add msgs to roundvote
+	var ok bool
+	for _, m := range msg.msgs[vw] {
+		switch m.Type() {
+		case VoteNewView:
+			roundVote.NewView, ok = m.(*NewViewMsg)
+			if !ok {
+				log.Errorf("invalid newview msg in construct roundvote (%d)", blknum)
+			}
+		case Proposal:
+			roundVote.Proposal, ok = m.(*ProposalMsg)
+			if ok {
+				roundVote.ProposerID = self.Index
+				roundVote.BlockHash = roundVote.Proposal.Block.Hash()
+				roundVote.PrevBlockHash = roundVote.Proposal.Block.Header.PrevBlockHash
+			} else {
+				log.Errorf("invalid proposal msg in construct roundvote (%d)", blknum)
+			}
+		case VotePrepare:
+			roundVote.Prepare, ok = m.(*PrepareMsg)
+			if !ok {
+				log.Errorf("invalid prepare msg in construct roundvote (%d)", blknum)
+			}
+		case VoteCommit:
+			roundVote.Commit, ok = m.(*CommitMsg)
+			if !ok {
+				log.Errorf("invalid commit msg in construct roundvote (%d)", blknum)
+			}
+		case RoundMerkleResult:
+			roundVote.Result, ok = m.(*ExecMerkleMsg)
+			if !ok {
+				log.Errorf("invalid merkle-result msg in construct roundvote (%d)", blknum)
+			}
+		}
+	}
+
+	// update blockhash if necessary
+	if roundVote.PrevBlockHash == common.UINT256_EMPTY {
+		if proposal := self.blockPool.getProposal(blknum, vw); proposal != nil {
+			roundVote.BlockHash = proposal.Hash()
+			roundVote.PrevBlockHash = proposal.Header.PrevBlockHash
+		}
+	}
+
+	return roundVote, nil
+}
+
+func (self *Server) constructVoteMsg(roundVotes []*RoundVoteMsg) (*VoteMsg, error) {
+	vote := &VoteMsg{
+		PeerID: self.Index,
+		Rounds: roundVotes,
+	}
+	sink := common.NewZeroCopySink(nil)
+	if err := vote.Serialize(sink); err != nil {
+		return nil, fmt.Errorf("failed to serialize votemsg: %s", err)
+	}
+	sig, err := signature.Sign(self.account, sink.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign votemsg: %s", err)
+	}
+
+	vote.Sig = sig
+	return vote, nil
+}

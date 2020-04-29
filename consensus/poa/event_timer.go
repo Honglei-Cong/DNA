@@ -23,6 +23,7 @@ package poa
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -51,7 +52,7 @@ type SendMsgEvent struct {
 
 type TimerEvent struct {
 	evtType  TimerEventType
-	blockNum uint32
+	blknum uint32
 	View     uint32
 	msg      ConsensusMsg
 }
@@ -127,7 +128,7 @@ func (self *EventTimer) StartTimer(Idx uint32, timeout time.Duration) {
 
 		self.C <- &TimerEvent{
 			evtType:  EventMax,
-			blockNum: Idx,
+			blknum: Idx,
 		}
 	})
 }
@@ -142,14 +143,14 @@ func (self *EventTimer) CancelTimer(idx uint32) {
 	}
 }
 
-func (self *EventTimer) getEventTimeout(evtType TimerEventType) time.Duration {
+func (self *EventTimer) getEventTimeout(evtType TimerEventType, view uint32) time.Duration {
 	switch evtType {
 	case EventPeerHeartbeat:
 		return peerHandshakeTimeout
 	case EventTxPool:
 		return txPooltimeout
 	case EventViewTimeout:
-		return newviewTimeout
+		return time.Duration(math.Pow(2, float64(view+1))-1) * newviewTimeout
 	}
 
 	return 0
@@ -158,23 +159,23 @@ func (self *EventTimer) getEventTimeout(evtType TimerEventType) time.Duration {
 //
 // internal helper, should call with lock held
 //
-func (self *EventTimer) startEventTimer(evtType TimerEventType, blockNum uint32) error {
+func (self *EventTimer) startEventTimer(evtType TimerEventType, blknum uint32, view uint32) error {
 	timers := self.eventTimers[evtType]
-	if t, present := timers[blockNum]; present {
+	if t, present := timers[blknum]; present {
 		t.Stop()
-		delete(timers, blockNum)
-		log.Infof("timer (type: %d) for %d got reset", evtType, blockNum)
+		delete(timers, blknum)
+		log.Infof("timer (type: %d) for %d got reset", evtType, blknum)
 	}
 
-	timeout := self.getEventTimeout(evtType)
+	timeout := self.getEventTimeout(evtType, view)
 	if timeout == 0 {
-		log.Errorf("invalid timeout for event %d, blkNum %d", evtType, blockNum)
-		return fmt.Errorf("invalid timeout for event %d, blkNum %d", evtType, blockNum)
+		log.Errorf("invalid timeout for event %d, blkNum %d", evtType, blknum)
+		return fmt.Errorf("invalid timeout for event %d, blkNum %d", evtType, blknum)
 	}
-	timers[blockNum] = time.AfterFunc(timeout, func() {
+	timers[blknum] = time.AfterFunc(timeout, func() {
 		self.C <- &TimerEvent{
 			evtType:  evtType,
-			blockNum: blockNum,
+			blknum: blknum,
 		}
 	})
 	return nil
@@ -183,22 +184,22 @@ func (self *EventTimer) startEventTimer(evtType TimerEventType, blockNum uint32)
 //
 // internal helper, should call with lock held
 //
-func (self *EventTimer) cancelEventTimer(evtType TimerEventType, blockNum uint32) {
+func (self *EventTimer) cancelEventTimer(evtType TimerEventType, blknum uint32) {
 	timers := self.eventTimers[evtType]
 
-	if t, present := timers[blockNum]; present {
+	if t, present := timers[blknum]; present {
 		t.Stop()
-		delete(timers, blockNum)
+		delete(timers, blknum)
 	}
 }
 
-func (self *EventTimer) onBlockSealed(blockNum uint32) {
+func (self *EventTimer) onBlockSealed(blknum uint32) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 
 	// clear event timers
 	for i := 0; i < int(EventMax); i++ {
-		self.cancelEventTimer(TimerEventType(i), blockNum)
+		self.cancelEventTimer(TimerEventType(i), blknum)
 	}
 }
 
@@ -211,11 +212,11 @@ func (self *EventTimer) startPeerTicker(peerIdx uint32) error {
 		log.Infof("ticker for %d got reset", peerIdx)
 	}
 
-	timeout := self.getEventTimeout(EventPeerHeartbeat)
+	timeout := self.getEventTimeout(EventPeerHeartbeat, 0)
 	self.peerTickers[peerIdx] = time.AfterFunc(timeout, func() {
 		self.C <- &TimerEvent{
 			evtType:  EventPeerHeartbeat,
-			blockNum: peerIdx,
+			blknum: peerIdx,
 		}
 		self.peerTickers[peerIdx].Reset(timeout)
 	})
@@ -234,16 +235,31 @@ func (self *EventTimer) stopPeerTicker(peerIdx uint32) error {
 	return nil
 }
 
-func (self *EventTimer) startTxTicker(blockNum uint32) error {
+func (self *EventTimer) startTxTicker(blknum uint32) error {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 
-	return self.startEventTimer(EventTxPool, blockNum)
+	return self.startEventTimer(EventTxPool, blknum, 0)
 }
 
-func (self *EventTimer) stopTxTicker(blockNum uint32) {
+func (self *EventTimer) stopTxTicker(blknum uint32) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 
-	self.cancelEventTimer(EventTxPool, blockNum)
+	self.cancelEventTimer(EventTxPool, blknum)
+}
+
+func (self *EventTimer) startViewTimeout(blknum, view uint32) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+
+	return self.startEventTimer(EventViewTimeout, blknum, view)
+}
+
+func (self *EventTimer) stopViewTimeout(blknum, view uint32) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+
+	// FIXME: indexed by (blknum, view)
+	self.cancelEventTimer(EventViewTimeout, blknum)
 }

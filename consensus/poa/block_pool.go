@@ -561,25 +561,6 @@ func (pool *BlockPool) isProPreparedLocked(height, view uint32) bool {
 	return cnt >= len(cfg.Proactors)-(len(cfg.Proactors)-1)/3
 }
 
-type VrfSeedData struct {
-	BlockNum uint32 `json:"block_num"`
-	View     uint32 `json:"view"`
-	VrfValue []byte `json:"vrf_value"`
-}
-
-func getBlockVrfValue(block *types.Block) ([]byte, []byte, error) {
-	if block == nil {
-		return nil, nil, fmt.Errorf("nil block in getBlockVrfValue")
-	}
-
-	blkInfo := vconfig.VbftBlockInfo{}
-	if err := json.Unmarshal(block.Header.ConsensusPayload, blkInfo); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
-	}
-	return blkInfo.VrfValue, blkInfo.VrfProof, nil
-}
-
-
 func (pool *BlockPool) GetParticipantConfig(height, view uint32) (*BlockParticipantConfig, error) {
 	pool.lock.RLock()
 	defer pool.lock.RUnlock()
@@ -783,7 +764,7 @@ func (pool *BlockPool) setSealed(height, view uint32) error {
 	}
 	if blocksubmitMsg, _ := pool.server.constructBlockSubmitMsg(pool.chainStore.GetChainedBlockNum(), stateRoot); blocksubmitMsg != nil {
 		pool.server.broadcast(blocksubmitMsg)
-		pool.server.bftActionC <- &BftAction{
+		pool.server.actionC <- &ServiceAction{
 			Type:     SubmitBlock,
 			BlockNum: pool.chainStore.GetChainedBlockNum(),
 		}

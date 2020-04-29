@@ -50,16 +50,17 @@ import (
 	"github.com/ontio/ontology-eventbus/actor"
 )
 
-type BftActionType uint8
+type ServiceActionType uint8
 
 const (
-	ProposeBlock BftActionType = iota
+	ProposeBlock ServiceActionType = iota
 	PrepareBlock
 	CommitBlock
 	SealBlock
 	FastForward // for syncer catch up
 	ReBroadcast
 	SubmitBlock
+	MakeResponse
 )
 
 const (
@@ -70,12 +71,12 @@ const (
 )
 
 const (
-	UNKNOWN_VIEW = math.MaxUint32
+	UNKNOWN_VIEW  = math.MaxUint32
 	UNKNOWN_EPOCH = math.MaxUint32
 )
 
-type BftAction struct {
-	Type     BftActionType
+type ServiceAction struct {
+	Type     ServiceActionType
 	BlockNum uint32
 	View     uint32
 }
@@ -127,14 +128,14 @@ type Server struct {
 	stateMgr   *StateMgr
 	timer      *EventTimer
 
-	msgRecvC   map[uint32]chan *p2pMsgPayload
-	msgC       chan ConsensusMsg
-	bftActionC chan *BftAction
-	msgSendC   chan *SendMsgEvent
-	sub        *events.ActorSubscriber
-	quitC      chan struct{}
-	quit       bool
-	quitWg     sync.WaitGroup
+	msgRecvC map[uint32]chan *p2pMsgPayload
+	msgC     chan ConsensusMsg
+	actionC  chan *ServiceAction
+	msgSendC chan *SendMsgEvent
+	sub      *events.ActorSubscriber
+	quitC    chan struct{}
+	quit     bool
+	quitWg   sync.WaitGroup
 }
 
 func NewPoAServer(account *account.Account, txpool, p2p *actor.PID) (*Server, error) {
@@ -292,7 +293,7 @@ func (self *Server) initialize() error {
 
 	self.msgRecvC = make(map[uint32]chan *p2pMsgPayload)
 	self.msgC = make(chan ConsensusMsg, CAP_MESSAGE_CHANNEL)
-	self.bftActionC = make(chan *BftAction, CAP_ACTION_CHANNEL)
+	self.actionC = make(chan *ServiceAction, CAP_ACTION_CHANNEL)
 	self.msgSendC = make(chan *SendMsgEvent, CAP_MSG_SEND_CHANNEL)
 
 	self.quitC = make(chan struct{})
@@ -480,110 +481,7 @@ func (self *Server) getState() ServerState {
 }
 
 func (self *Server) updateParticipantConfig() error {
-	blkNum := self.GetCurrentBlockNo()
-	block, _ := self.blockPool.getSealedBlock(blkNum - 1)
-	if block == nil {
-		return fmt.Errorf("failed to get sealed block (%d)", blkNum-1)
-	}
-	chainconfig := self.config
-	if block.Info.NewChainConfig != nil {
-		chainconfig = block.Info.NewChainConfig
-	}
-	self.metaLock.Lock()
-	cfg, err := self.buildParticipantConfig(blkNum, block, chainconfig)
-	if err == nil {
-		self.currentParticipantConfig = cfg
-	}
-	self.metaLock.Unlock()
-	if err != nil {
-		return fmt.Errorf("failed to build participant config (%d): %s", blkNum, err)
-	}
-	// TODO: if server is not in new config, self.stop()
-	return nil
-}
-
-func (self *Server) _startNewRound() error {
-	blkNum := self.GetCurrentBlockNo()
-
-	if err := self.updateParticipantConfig(); err != nil {
-		log.Errorf("startNewRound error:%s", err)
-		return err
-	}
-
-	// if we're leader of some round,
-	//   if proposal-justify available, make new proposal
-	//   else wait proposal-justify
-	// if we're
-
-	// check proposals in msgpool
-	var proposal *blockProposalMsg
-	if proposals := self.msgPool.GetProposalMsgs(blkNum); len(proposals) > 0 {
-		for _, p := range proposals {
-			msg := p.(*blockProposalMsg)
-			if msg == nil {
-				continue
-			}
-			if self.isProposer(blkNum, msg.Block.getProposer()) {
-				// get proposal from proposer, process it
-				proposal = msg
-			} else {
-				// add other proposals to blockpool
-				if err := self.blockPool.newBlockProposal(msg); err != nil {
-					log.Errorf("starting new round, failed to add proposal from %d: %s",
-						msg.Block.getProposer(), err)
-				}
-			}
-		}
-	}
-
-	endorses := self.msgPool.GetEndorsementsMsgs(blkNum)
-	if len(endorses) > 0 {
-		for _, e := range endorses {
-			msg := e.(*blockEndorseMsg)
-			if msg == nil {
-				continue
-			}
-			self.blockPool.newBlockEndorsement(msg)
-		}
-	}
-
-	commits := self.msgPool.GetCommitMsgs(blkNum)
-	if len(commits) > 0 {
-		for _, c := range commits {
-			msg := c.(*blockCommitMsg)
-			if msg == nil {
-				continue
-			}
-			if err := self.blockPool.newBlockCommitment(msg); err != nil {
-				log.Infof("start new round, failed to add commit, blk %d, commit for %d: %s",
-					blkNum, msg.BlockProposer, err)
-			}
-		}
-	}
-	if _, _, done := self.blockPool.commitDone(blkNum, self.config.C, self.config.N); done && len(commits) > 0 {
-		// resend commit msg to msg-processor to restart commit-done processing
-		// Note: commitDone will set Done flag in block-pool, so removed Done flag checking
-		// in commit msg processing.
-		self.blockPool.setCommitDone(blkNum)
-		self.processConsensusMsg(commits[0])
-		return nil
-	} else if _, _, done := self.blockPool.endorseDone(blkNum, self.config.C); done && len(endorses) > 0 {
-		// resend endorse msg to msg-processor to restart endorse-done processing
-		self.processConsensusMsg(endorses[0])
-		return nil
-	} else if proposal != nil {
-		self.processProposalMsg(proposal)
-		return nil
-	}
-	if err := self.timer.startTxTicker(blkNum); err != nil {
-		log.Errorf("startxticker blk:%d,err:%s", blkNum, err)
-		return err
-	}
-	if err := self.timer.StartTxBlockTimeout(blkNum); err != nil {
-		log.Errorf("starttxblocktimeout blk:%d,err:%s", blkNum, err)
-		return err
-	}
-	return nil
+	return self.configPool.updateChainConfig()
 }
 
 func (self *Server) startNewProposal(blkNum, view uint32) {
@@ -591,7 +489,7 @@ func (self *Server) startNewProposal(blkNum, view uint32) {
 	if self.isProposer(blkNum, view, self.Index) {
 		log.Infof("server %d, proposer for block %d", self.Index, blkNum)
 		// FIXME: possible deadlock on channel
-		self.bftActionC <- &BftAction{
+		self.actionC <- &ServiceAction{
 			Type:     ProposeBlock,
 			BlockNum: blkNum,
 			View:     view,
@@ -600,8 +498,8 @@ func (self *Server) startNewProposal(blkNum, view uint32) {
 
 	// TODO: if new round block proposal has received, go endorsing/committing directly
 
-	if err := self.timer.StartViewTimeout(blkNum, view); err != nil {
-		log.Errorf("server %d, startnewproposal for block %d err:%s", self.Index, blkNum, err)
+	if err := self.timer.startViewTimeout(blkNum, view); err != nil {
+		log.Errorf("server %d, startViewTimer (%d,%d) err:%s", self.Index, blkNum, view, err)
 	}
 }
 
@@ -764,14 +662,14 @@ func (self *Server) onConsensusMsg(peerIdx uint32, msg ConsensusMsg, msgHash com
 		maxCnt := 64
 		blkInfos := make([]*BlockInfo_, 0)
 		targetBlkNum := self.GetCommittedBlockNo()
-		for startBlkNum := pMsg.StartBlockNum; startBlkNum <= targetBlkNum; startBlkNum++ {
-			blk, _ := self.blockPool.getSealedBlock(startBlkNum)
+		for blkNum := pMsg.StartBlockNum; blkNum <= targetBlkNum; blkNum++ {
+			blk, _ := self.blockPool.getSealedBlock(blkNum)
 			if blk == nil {
 				break
 			}
 			blkInfos = append(blkInfos, &BlockInfo_{
-				BlockNum: startBlkNum,
-				Proposer: blk.getProposer(),
+				BlockNum:   blkNum,
+				Signatures: blk.Header.SigData,
 			})
 			if len(blkInfos) >= maxCnt {
 				break
@@ -807,7 +705,7 @@ func (self *Server) onConsensusMsg(peerIdx uint32, msg ConsensusMsg, msgHash com
 			return
 		}
 		if self.CheckSubmitBlock(msgBlkNum, pMsg.BlockStateRoot) {
-			self.bftActionC <- &BftAction{
+			self.actionC <- &ServiceAction{
 				Type:     SubmitBlock,
 				BlockNum: msgBlkNum,
 			}
@@ -862,7 +760,7 @@ func (self *Server) processNewView(msg *RoundVoteMsg) error {
 	self.blockPool.processNewView(msg.Height, msg.View)
 	if self.blockPool.getActiveView(msg.Height) > msg.View {
 		// if new-view reached QC
-		v := msg.View+1
+		v := msg.View + 1
 		if self.blockPool.isLeaderOf(msg.Height, v, self.Index) {
 			if self.blockPool.isProposalReady(msg.Height, v) {
 				return nil
@@ -911,8 +809,38 @@ func (self *Server) processPropose(msg *RoundVoteMsg) error {
 	return nil
 }
 
-func (self *Server) responseVoteMsg(msg *VoteMsg) error {
-	// TODO
+func (self *Server) responseVoteMsg(blknum uint32) error {
+	// get start height
+	h := self.rspMsgs.getFirstResponseHeight()
+
+	// loop constructing round-vote msgs, make sure continuous round-vote
+	roundVotes := make([]*RoundVoteMsg, 0)
+	for {
+		// FIXME: make sure all round-rsp in same fork
+		rsp := self.rspMsgs.getRoundResponse(h)
+		if rsp == nil {
+			break
+		}
+		vote, err := self.constructRoundVoteMsg(h, rsp)
+		if err != nil {
+			log.Errorf("failed to construct roundvote msg (%d): %s", h, err)
+			break
+		}
+		if vote == nil {
+			break
+		}
+		roundVotes = append(roundVotes, vote)
+		h += 1
+	}
+	if len(roundVotes) == 0 {
+		return nil
+	}
+
+	votemsg, err := self.constructVoteMsg(roundVotes)
+	if err != nil {
+		return fmt.Errorf("failed to constrcut vote msg: %s", err)
+	}
+	self.broadcast(votemsg)
 	return nil
 }
 
@@ -966,13 +894,15 @@ func (self *Server) processMsgEvent() error {
 					break
 				}
 			}
-			if err := self.responseVoteMsg(pMsg); err != nil {
-				log.Errorf("failed to response vote msg from %d: %s", pMsg.PeerID, err)
-			}
 			if self.blockPool.getSafePreparedBlockNum() >= pMsg.GetHeight() {
 				if err := self.startNewRound(); err != nil {
 					log.Errorf("failed to start new round after processed commit %d: %s", pMsg.GetHeight(), err)
 				}
+			}
+			// make response
+			self.actionC <- &ServiceAction{
+				Type:     MakeResponse,
+				BlockNum: pMsg.GetHeight(),
 			}
 		case ChangeViewMessage:
 
@@ -990,7 +920,7 @@ func (self *Server) actionLoop() {
 
 	for {
 		select {
-		case action := <-self.bftActionC:
+		case action := <-self.actionC:
 			switch action.Type {
 			case ProposeBlock:
 				if action.View < self.blockPool.getActiveView(action.BlockNum) {
@@ -1024,6 +954,7 @@ func (self *Server) actionLoop() {
 				// 2. if commit consensused, seal the proposal
 				for {
 					blkNum := self.GetCurrentBlockNo()
+					cfg := self.configPool.getChainConfig(blkNum)
 					C := int(self.config.C)
 					N := int(self.config.N)
 
@@ -1209,6 +1140,10 @@ func (self *Server) actionLoop() {
 					if err := self.blockPool.submitBlock(action.BlockNum); err != nil {
 						log.Errorf("SubmitBlock err:%s", err)
 					}
+				}
+			case MakeResponse:
+				if err := self.responseVoteMsg(action.BlockNum); err != nil {
+					log.Errorf("failed to response vote msg (%d): %s", action.BlockNum, err)
 				}
 			}
 		case <-self.quitC:
@@ -1497,22 +1432,32 @@ func (self *Server) creategovernaceTransaction(blkNum uint32) (*types.Transactio
 }
 
 //checkNeedUpdateChainConfig use blockcount
-func (self *Server) checkNeedUpdateChainConfig(blockNum uint32) bool {
-	prevBlk, _ := self.blockPool.getSealedBlock(blockNum - 1)
+func (self *Server) checkNeedUpdateChainConfig(blkNum uint32) bool {
+	prevBlk, _ := self.blockPool.getSealedBlock(blkNum - 1)
 	if prevBlk == nil {
-		log.Errorf("failed to get prevBlock (%d)", blockNum-1)
+		log.Errorf("failed to get prevBlock (%d)", blkNum-1)
 		return false
 	}
-	lastConfigBlkNum := prevBlk.getLastConfigBlockNum()
-	if (blockNum - lastConfigBlkNum) >= self.config.MaxBlockChangeView {
-		return true
+	lastConfigBlkNum, err := getBlockLastConfigHeight(prevBlk)
+	if err != nil {
+		log.Errorf("failed to get lastConfigHeight of block (%d)", blkNum-1)
+		return false
 	}
-	return false
+	chaincfg := self.configPool.getChainConfig(blkNum)
+	if chaincfg != nil {
+		log.Errorf("failed to chainconfig of block %d", blkNum)
+		return false
+	}
+	return (blkNum - lastConfigBlkNum) >= chaincfg.MaxBlockChangeView
 }
 
 //checkUpdateChainConfig query leveldb check is force update
 func (self *Server) checkUpdateChainConfig(blkNum uint32) bool {
-	force, err := isUpdate(self.blockPool.getExecWriteSet(blkNum-1), self.config.View)
+	chaincfg := self.configPool.getChainConfig(blkNum)
+	if chaincfg != nil {
+		return false
+	}
+	force, err := isUpdate(self.blockPool.getExecWriteSet(blkNum-1), chaincfg.View)
 	if err != nil {
 		log.Errorf("checkUpdateChainConfig err:%s", err)
 		return false
@@ -1548,7 +1493,7 @@ func (self *Server) nonSystxs(sysTxs []*types.Transaction, blkNum uint32) bool {
 }
 
 func (self *Server) makeProposal(blknum, view uint32) {
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     ProposeBlock,
 		BlockNum: blknum,
 		View:     view,
@@ -1557,7 +1502,7 @@ func (self *Server) makeProposal(blknum, view uint32) {
 
 // invoked from block-processor, non-blocking
 func (self *Server) makePrepare(blknum, view uint32) {
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     PrepareBlock,
 		BlockNum: blknum,
 		View:     view,
@@ -1566,7 +1511,7 @@ func (self *Server) makePrepare(blknum, view uint32) {
 
 // invoked from block-processor, non-blocking
 func (self *Server) makeCommitment(blknum, view uint32) {
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     CommitBlock,
 		BlockNum: blknum,
 		View:     view,
@@ -1583,7 +1528,7 @@ func (self *Server) makeSealed(blknum, view uint32, block *types.Block) error {
 	log.Infof("server %d ready to seal block (%d,%d)", self.Index, blknum, view)
 
 	// seal the block
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     SealBlock,
 		BlockNum: blknum,
 		View:     view,
@@ -1597,16 +1542,16 @@ func (self *Server) makeFinalized(blknum uint32, block *types.Block, merkleRoot 
 }
 
 func (self *Server) makeFastForward() error {
-	if len(self.bftActionC)+3 >= cap(self.bftActionC) {
+	if len(self.actionC)+3 >= cap(self.actionC) {
 		// FIXME:
 		// some cases, such as burst of heartbeat msg, may do too much fast forward.
 		// make bftActionC full, and bftActionLoop halted.
 		// TODO: add throttling in state-mgmt
 		return fmt.Errorf("server %d make fastforward skipped, %d vs %d",
-			self.Index, len(self.bftActionC), cap(self.bftActionC))
+			self.Index, len(self.actionC), cap(self.actionC))
 	}
 
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     FastForward,
 		BlockNum: self.GetCurrentBlockNo(),
 	}
@@ -1614,16 +1559,16 @@ func (self *Server) makeFastForward() error {
 }
 
 func (self *Server) reBroadcastCurrentRoundMsgs() error {
-	if len(self.bftActionC)+3 >= cap(self.bftActionC) {
+	if len(self.actionC)+3 >= cap(self.actionC) {
 		// FIXME:
 		// some cases, such as burst of heartbeat msg, may do too much rebroadcast.
 		// make bftActionC full, and bftActionLoop halted.
 		// TODO: add throttling in state-mgmt
 		return fmt.Errorf("server %d make rebroadcasting skipped, %d vs %d",
-			self.Index, len(self.bftActionC), cap(self.bftActionC))
+			self.Index, len(self.actionC), cap(self.actionC))
 	}
 
-	self.bftActionC <- &BftAction{
+	self.actionC <- &ServiceAction{
 		Type:     ReBroadcast,
 		BlockNum: self.GetCurrentBlockNo(),
 	}

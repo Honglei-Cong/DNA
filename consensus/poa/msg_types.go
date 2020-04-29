@@ -591,9 +591,8 @@ func (msg *BlockInfoFetchMsg) Deserialize(source *common.ZeroCopySource) error {
 }
 
 type BlockInfo_ struct {
-	BlockNum   uint32            `json:"block_num"`
-	Proposer   uint32            `json:"proposer"`
-	Signatures map[uint32][]byte `json:"signatures"`
+	BlockNum   uint32   `json:"block_num"`
+	Signatures [][]byte `json:"signatures"`
 }
 
 // to fetch committed block from neighbours

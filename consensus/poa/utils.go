@@ -37,6 +37,7 @@ import (
 	"github.com/DNAProject/DNA/core/states"
 	scommon "github.com/DNAProject/DNA/core/store/common"
 	"github.com/DNAProject/DNA/core/store/overlaydb"
+	"github.com/DNAProject/DNA/core/types"
 	gov "github.com/DNAProject/DNA/smartcontract/service/native/governance"
 	nutils "github.com/DNAProject/DNA/smartcontract/service/native/utils"
 	"github.com/ontio/ontology-crypto/keypair"
@@ -291,4 +292,35 @@ func getChainConfig(blkNum uint32) (*vconfig.ChainConfig, error) {
 	}
 	cfg.View = goverview.View
 	return cfg, err
+}
+
+type VrfSeedData struct {
+	BlockNum uint32 `json:"block_num"`
+	View     uint32 `json:"view"`
+	VrfValue []byte `json:"vrf_value"`
+}
+
+func getBlockVrfValue(block *types.Block) ([]byte, []byte, error) {
+	if block == nil {
+		return nil, nil, fmt.Errorf("nil block in getBlockVrfValue")
+	}
+
+	blkInfo := vconfig.VbftBlockInfo{}
+	if err := json.Unmarshal(block.Header.ConsensusPayload, blkInfo); err != nil {
+		return nil, nil, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
+	}
+	return blkInfo.VrfValue, blkInfo.VrfProof, nil
+}
+
+func getBlockLastConfigHeight(block *types.Block) (uint32, error) {
+	if block == nil {
+		return 0, fmt.Errorf("nil block in getBlockLastConfigHeight")
+	}
+
+	blkInfo := vconfig.VbftBlockInfo{}
+	if err := json.Unmarshal(block.Header.ConsensusPayload, blkInfo); err != nil {
+		return 0, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
+	}
+	return blkInfo.LastConfigBlockNum, nil
+
 }
