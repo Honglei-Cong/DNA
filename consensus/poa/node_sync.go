@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DNAProject/DNA/common"
 	"github.com/DNAProject/DNA/common/log"
 	"github.com/DNAProject/DNA/core/ledger"
 	"github.com/DNAProject/DNA/core/types"
@@ -187,23 +186,7 @@ func (self *Syncer) run() {
 					blk, _ = self.server.blockPool.getSealedBlock(self.nextReqBlkNum)
 				}
 				if blk == nil {
-					blk = self.blockConsensusDone(self.pendingBlocks[self.nextReqBlkNum])
-					merkBlk := self.blockCheckMerkleRoot(self.pendingBlocks[self.nextReqBlkNum])
-					if blk == nil || merkBlk == nil {
-						break
-					}
-					if blk.getPrevBlockMerkleRoot() != merkBlk.getPrevBlockMerkleRoot() {
-						break
-					}
-				} else {
-					merkleRoot, err := self.server.blockPool.getExecMerkleRoot(blkNum - 1)
-					if err != nil {
-						log.Errorf("failed to GetExecMerkleRoot: %s,blkNum:%d", err, (blkNum - 1))
-						break
-					}
-					if blk.getPrevBlockMerkleRoot() != merkleRoot {
-						break
-					}
+					blk = self.blockConsensusDone(self.nextReqBlkNum, self.pendingBlocks[self.nextReqBlkNum])
 				}
 				if blk == nil {
 					break
@@ -242,17 +225,30 @@ func (self *Syncer) run() {
 	}
 }
 
-func (self *Syncer) blockConsensusDone(blks BlockFromPeers) *types.Block {
+func (self *Syncer) blockConsensusDone(blknum uint32, blks BlockFromPeers) *types.Block {
 	// TODO: also check blockhash
-	proposers := make(map[uint32]int)
-	for _, blk := range blks {
-		proposers[blk.getProposer()] += 1
+	views := make(map[uint32]int)
+	for peerid, blk := range blks {
+		blkView, _, err := getBlockView(blk)
+		// TODO: verify view-proof
+		if err != nil {
+			log.Errorf("failed to parse blockview in block %d from %d", blknum, peerid)
+			continue
+		}
+		views[blkView] += 1
 	}
-	for proposerId, cnt := range proposers {
-		if cnt > int(self.server.config.C) {
+
+	chainCfg := self.server.GetChainConfig(blknum)
+	if chainCfg != nil {
+		log.Errorf("failed to get chainconfig of block %d", blknum)
+		return nil
+	}
+	for view, cnt := range views {
+		if cnt > int(chainCfg.C) {
 			// find the block
 			for _, blk := range blks {
-				if blk.getProposer() == proposerId {
+				v, _, err := getBlockView(blk)
+				if err == nil && v == view {
 					return blk
 				}
 			}
@@ -269,23 +265,6 @@ func (self *Syncer) getCurrentTargetBlockNum() uint32 {
 		}
 	}
 	return targetBlkNum
-}
-func (self *Syncer) blockCheckMerkleRoot(blks BlockFromPeers) *types.Block {
-	merkleRoot := make(map[common.Uint256]int)
-	for _, blk := range blks {
-		merkleRoot[blk.getPrevBlockMerkleRoot()] += 1
-	}
-	for merklerootvalue, cnt := range merkleRoot {
-		if cnt > int(self.server.config.C) {
-			// find the block
-			for _, blk := range blks {
-				if blk.getPrevBlockMerkleRoot() == merklerootvalue {
-					return blk
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func (self *Syncer) isActive() bool {
@@ -386,10 +365,10 @@ func (self *PeerSyncer) run() {
 	}()
 
 	var err error
-	blkProposers := make(map[uint32]uint32)
+	blkRounds := make(map[uint32]uint32)
 	for self.nextReqBlkNum <= self.targetBlkNum {
 		blkNum := self.nextReqBlkNum
-		if _, present := blkProposers[blkNum]; !present {
+		if _, present := blkRounds[blkNum]; !present {
 			blkInfos, err := self.requestBlockInfo(blkNum)
 			if err != nil {
 				log.Errorf("server %d failed to construct blockinfo fetch msg to peer %d: %s",
@@ -397,10 +376,10 @@ func (self *PeerSyncer) run() {
 				return
 			}
 			for _, p := range blkInfos {
-				blkProposers[p.BlockNum] = p.Proposer
+				blkRounds[p.BlockNum] = p.Round
 			}
 		}
-		if _, present := blkProposers[blkNum]; !present {
+		if _, present := blkRounds[blkNum]; !present {
 			log.Errorf("server %d failed to get block %d proposer from %d", self.server.Index,
 				blkNum, self.peerIdx)
 			return
@@ -418,7 +397,7 @@ func (self *PeerSyncer) run() {
 			log.Errorf("failed to commit block %d from peer syncer %d to syncer: %s",
 				blkNum, self.peerIdx, err)
 		}
-		delete(blkProposers, blkNum)
+		delete(blkRounds, blkNum)
 	}
 	errQuit = false
 }
@@ -441,7 +420,7 @@ func (self *PeerSyncer) requestBlock(blkNum uint32) (*types.Block, error) {
 		Msg:    msg,
 	}
 
-	t := time.NewTimer(makeProposalTimeout * 2)
+	t := time.NewTimer(peerBlockSyncTimeout * 2)
 	defer t.Stop()
 
 	select {
@@ -472,7 +451,7 @@ func (self *PeerSyncer) requestBlockInfo(startBlkNum uint32) ([]*BlockInfo_, err
 		Msg:    msg,
 	}
 
-	t := time.NewTimer(makeProposalTimeout * 2)
+	t := time.NewTimer(peerBlockSyncTimeout * 2)
 	defer t.Stop()
 
 	select {

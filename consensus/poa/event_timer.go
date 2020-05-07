@@ -43,6 +43,7 @@ var (
 	newviewTimeout       = 10 * time.Second
 	peerHandshakeTimeout = 10 * time.Second
 	txPooltimeout        = 1 * time.Second
+	peerBlockSyncTimeout = 10 * time.Second
 )
 
 type SendMsgEvent struct {
@@ -51,10 +52,10 @@ type SendMsgEvent struct {
 }
 
 type TimerEvent struct {
-	evtType  TimerEventType
-	blknum uint32
-	View     uint32
-	msg      ConsensusMsg
+	evtType TimerEventType
+	blknum  uint32
+	View    uint32
+	msg     ConsensusMsg
 }
 
 type perBlockTimer map[uint32]*time.Timer
@@ -127,8 +128,8 @@ func (self *EventTimer) StartTimer(Idx uint32, timeout time.Duration) {
 		delete(self.normalTimers, Idx)
 
 		self.C <- &TimerEvent{
-			evtType:  EventMax,
-			blknum: Idx,
+			evtType: EventMax,
+			blknum:  Idx,
 		}
 	})
 }
@@ -174,8 +175,8 @@ func (self *EventTimer) startEventTimer(evtType TimerEventType, blknum uint32, v
 	}
 	timers[blknum] = time.AfterFunc(timeout, func() {
 		self.C <- &TimerEvent{
-			evtType:  evtType,
-			blknum: blknum,
+			evtType: evtType,
+			blknum:  blknum,
 		}
 	})
 	return nil
@@ -215,8 +216,8 @@ func (self *EventTimer) startPeerTicker(peerIdx uint32) error {
 	timeout := self.getEventTimeout(EventPeerHeartbeat, 0)
 	self.peerTickers[peerIdx] = time.AfterFunc(timeout, func() {
 		self.C <- &TimerEvent{
-			evtType:  EventPeerHeartbeat,
-			blknum: peerIdx,
+			evtType: EventPeerHeartbeat,
+			blknum:  peerIdx,
 		}
 		self.peerTickers[peerIdx].Reset(timeout)
 	})

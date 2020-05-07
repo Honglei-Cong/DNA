@@ -546,8 +546,8 @@ func (self *Server) onConsensusMsg(peerIdx uint32, msg ConsensusMsg, msgHash com
 				log.Infof("server %d get endorse msg for block %d, from %d, current committed %d",
 					self.Index, msg.GetHeight(), pMsg.PeerID, self.GetCommittedBlockNo())
 				self.timer.C <- &TimerEvent{
-					evtType:  EventPeerHeartbeat,
-					blockNum: self.GetCommittedBlockNo(),
+					evtType: EventPeerHeartbeat,
+					blknum:  self.GetCommittedBlockNo(),
 				}
 			}
 			return
@@ -590,8 +590,8 @@ func (self *Server) onConsensusMsg(peerIdx uint32, msg ConsensusMsg, msgHash com
 		if pMsg.CommittedBlockNumber+MAX_SYNCING_CHECK_BLK_NUM < self.GetCommittedBlockNo() {
 			// delayed peer detected, response heartbeat with our chain Info
 			self.timer.C <- &TimerEvent{
-				evtType:  EventPeerHeartbeat,
-				blockNum: peerIdx,
+				evtType: EventPeerHeartbeat,
+				blknum:  peerIdx,
 			}
 		}
 
@@ -667,8 +667,14 @@ func (self *Server) onConsensusMsg(peerIdx uint32, msg ConsensusMsg, msgHash com
 			if blk == nil {
 				break
 			}
+			view, _, err := getBlockView(blk)
+			if err != nil {
+				log.Errorf("failed to blockview %d: %s", blkNum, err)
+				break
+			}
 			blkInfos = append(blkInfos, &BlockInfo_{
 				BlockNum:   blkNum,
+				Round:      view,
 				Signatures: blk.Header.SigData,
 			})
 			if len(blkInfos) >= maxCnt {
@@ -753,11 +759,14 @@ func (self *Server) processRoundVoteMsg(msg *RoundVoteMsg) error {
 }
 
 func (self *Server) processNewView(msg *RoundVoteMsg) error {
-	if self.blockPool.getActiveView(msg.Height) >= msg.View {
+	activeView := self.blockPool.getActiveView(msg.Height)
+	if activeView >= msg.View {
+		log.Infof("current active view %d, skipped new view %d", activeView, msg.View)
 		return nil
 	}
 
 	self.blockPool.processNewView(msg.Height, msg.View)
+	// check active view again
 	if self.blockPool.getActiveView(msg.Height) > msg.View {
 		// if new-view reached QC
 		v := msg.View + 1
@@ -1176,10 +1185,22 @@ func (self *Server) processTimerEvent(evt *TimerEvent) error {
 	case EventPeerHeartbeat:
 		self.heartbeat()
 
+	case EventViewTimeout:
+		// check if any progress on view
+		if self.blockPool.getActiveView(evt.blknum) > evt.View {
+			return nil
+		}
+		// send viewchange message if no progress
+		changeMsg, err := self.constructViewChangeMsg(evt.blknum, evt.View)
+		if err != nil {
+			return err
+		}
+		self.broadcast(changeMsg)
+
 	case EventTxPool:
-		self.timer.stopTxTicker(evt.blockNum)
-		if self.completedBlockNum+1 == evt.blockNum {
-			validHeight := self.validHeight(evt.blockNum)
+		self.timer.stopTxTicker(evt.blknum)
+		if self.completedBlockNum+1 == evt.blknum {
+			validHeight := self.validHeight(evt.blknum)
 			newProposal := false
 			for _, e := range self.poolActor.GetTxnPool(true, validHeight) {
 				if err := self.incrValidator.Verify(e.Tx, validHeight); err == nil {
@@ -1188,13 +1209,13 @@ func (self *Server) processTimerEvent(evt *TimerEvent) error {
 				}
 			}
 			if newProposal {
-				self.startNewProposal(evt.blockNum, 0)
+				self.startNewProposal(evt.blknum, 0)
 			} else {
 				//reset timer, continue waiting txs from txnpool
-				self.timer.startTxTicker(evt.blockNum)
+				self.timer.startTxTicker(evt.blknum)
 			}
 		} else {
-			self.timer.startTxTicker(evt.blockNum)
+			self.timer.startTxTicker(evt.blknum)
 		}
 	}
 	return nil
@@ -1232,27 +1253,27 @@ func (self *Server) processHeartbeatMsg(peerIdx uint32, msg *peerHeartbeatMsg) {
 	}
 }
 
-func (self *Server) proposeBlock(blkNum uint32, view uint32) error {
+func (self *Server) proposeBlock(blknum uint32, view uint32) error {
 	if self.nonConsensusNode() {
 		return fmt.Errorf("server %d quit consensus node", self.Index)
 	}
 
 	forEmpty := false
-	validHeight := self.validHeight(blkNum)
+	validHeight := self.validHeight(blknum)
 	sysTxs := make([]*types.Transaction, 0)
 	userTxs := make([]*types.Transaction, 0)
 
 	//check need upate chainconfig
 	cfg := &vconfig.ChainConfig{}
 	cfg = nil
-	if self.checkNeedUpdateChainConfig(blkNum) || self.checkUpdateChainConfig(blkNum) {
-		chainconfig, err := getChainConfig(blkNum)
-		if err != nil {
-			return fmt.Errorf("getChainConfig failed:%s", err)
+	if self.checkNeedUpdateChainConfig(blknum) || self.checkUpdateChainConfig(blknum) {
+		chainconfig := self.configPool.getChainConfig(blknum)
+		if chainconfig == nil {
+			return fmt.Errorf("failed to getChainConfig when proposing block (%d,%d)", blknum, view)
 		}
 		//add transaction invoke governance native commit_pos contract
-		if self.checkNeedUpdateChainConfig(blkNum) {
-			tx, err := self.creategovernaceTransaction(blkNum)
+		if self.checkNeedUpdateChainConfig(blknum) {
+			tx, err := self.creategovernaceTransaction(blknum)
 			if err != nil {
 				return fmt.Errorf("construct governace transaction error: %v", err)
 			}
@@ -1269,13 +1290,13 @@ func (self *Server) proposeBlock(blkNum uint32, view uint32) error {
 			}
 		}
 	}
-	proposalMsg, err := self.constructProposalMsg(blkNum, view, sysTxs, userTxs, cfg)
+	proposalMsg, err := self.constructProposalMsg(blknum, view, sysTxs, userTxs, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to construct proposal: %s", err)
 	}
 
-	self.rspMsgs.addMsg(blkNum, view, proposalMsg)
-	log.Infof("server %d make proposal for block %d", self.Index, blkNum)
+	self.rspMsgs.addMsg(blknum, view, proposalMsg)
+	log.Infof("server %d make proposal for block %d", self.Index, blknum)
 	return nil
 }
 
@@ -1362,7 +1383,7 @@ func (self *Server) sealProposal(blknum, view uint32) error {
 		return err
 	}
 
-	if self.hasBlockConsensused() {
+	if self.hasBlockConsensused(blknum+1) {
 		return self.makeFastForward()
 	} else {
 		return self.startNewRound()
@@ -1691,11 +1712,9 @@ func (self *Server) verifyPrevBlockHash(blkNum uint32, prevBlkHash common.Uint25
 	return nil
 }
 
-func (self *Server) hasBlockConsensused() bool {
-	blkNum := self.GetCurrentBlockNo()
-
+func (self *Server) hasBlockConsensused(blknum uint32) bool {
 	C := int(self.config.C)
-	cMsgs := self.msgPool.GetCommitMsgs(blkNum)
+	cMsgs := self.msgPool.GetCommitMsgs(blknum)
 	proposers := make(map[uint32]int)
 	for _, msg := range cMsgs {
 		c, ok := msg.(*blockCommitMsg)

@@ -461,3 +461,29 @@ func (self *Server) constructVoteMsg(roundVotes []*RoundVoteMsg) (*VoteMsg, erro
 	vote.Sig = sig
 	return vote, nil
 }
+
+func (self *Server) constructViewChangeMsg(blknum, view uint32) (*ChangeViewMsg, error) {
+	lastPrepareView, _ := self.blockPool.getLastPreparedView(blknum)
+	lastCommitView, lastCommit := self.blockPool.getLastCommitView(blknum)
+
+	vc := &ChangeViewMsg{
+		NodeID:           self.Index,
+		Height:           blknum,
+		NewView:          view,
+		LastPreparedView: lastPrepareView,
+		LastCommitView:   lastCommitView,
+		LastCommit:       lastCommit,
+	}
+
+	sink := common.NewZeroCopySink(nil)
+	if err := vc.Serialize(sink); err != nil {
+		return nil, fmt.Errorf("failed to serialize vcmsg: %s", err)
+	}
+	sig, err := signature.Sign(self.account, sink.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign vcmsg: %s", err)
+	}
+
+	vc.Sig = sig
+	return vc, nil
+}

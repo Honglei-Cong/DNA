@@ -54,6 +54,11 @@ type ChainConfig struct {
 	MaxBlockChangeView   uint32        `json:"MaxBlockChangeView"`
 }
 
+type RoundProof struct {
+	Round     uint32            `json:"round"`      // round-view in PoA
+	ProofSigs map[uint32][]byte `json:"proof_sigs"` // new-view signatures in PoA
+}
+
 //
 // VBFT consensus payload, stored on each block header
 //
@@ -63,6 +68,7 @@ type VbftBlockInfo struct {
 	VrfProof           []byte       `json:"vrf_proof"`
 	LastConfigBlockNum uint32       `json:"last_config_block_num"`
 	NewChainConfig     *ChainConfig `json:"new_chain_config"`
+	Round              *RoundProof  `json:"round"`		// for PoA
 }
 
 const (

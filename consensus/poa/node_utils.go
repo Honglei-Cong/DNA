@@ -69,67 +69,6 @@ func (self *Server) isProposer(blockNum, view uint32, peerIdx uint32) bool {
 	return self.blockPool.isLeaderOf(blockNum, view, peerIdx)
 }
 
-//
-//  call this method with metaLock locked
-//
-func (self *Server) buildParticipantConfig(blkNum uint32, lastBlk *types.Block, chainCfg *vconfig.ChainConfig) (*BlockParticipantConfig, error) {
-
-	if blkNum == 0 {
-		return nil, fmt.Errorf("not participant config for genesis block")
-	}
-
-	seed := getParticipantSelectionSeed(lastBlk)
-	if seed.IsNil() {
-		return nil, fmt.Errorf("failed to calculate participant SelectionSeed")
-	}
-
-	cfg := &BlockParticipantConfig{
-		BlockNum:    blkNum,
-		VrfSeed:     seed,
-		ChainConfig: chainCfg,
-	}
-
-	cfg.Proactors = calcParticipantPeers(cfg, chainCfg)
-	cfg.Leader = cfg.Proactors[0]	// first one as leader
-	log.Infof("server %d, blkNum: %d, state: %d, participants config: %v", self.Index, blkNum,
-		self.getState(), cfg.Proactors)
-
-	return cfg, nil
-}
-
-func calcParticipantPeers(cfg *BlockParticipantConfig, chain *vconfig.ChainConfig) []uint32 {
-
-	peers := make([]uint32, 0)
-	peerMap := make(map[uint32]bool)
-
-	for i := 0; i < len(chain.PosTable); i++ {
-		peerId := calcParticipant(cfg.VrfSeed, chain.PosTable, uint32(i))
-		if peerId == math.MaxUint32 {
-			break
-		}
-		if _, present := peerMap[peerId]; !present {
-			peers = append(peers, peerId)
-			peerMap[peerId] = true
-		}
-	}
-
-	c := int(chain.C)
-	if len(peers) > c*3 {
-		return peers[:3*c+1]
-	}
-
-	for _, peer := range chain.Peers {
-		if _, present := peerMap[peer.Index]; !present {
-			peers = append(peers, peer.Index)
-			peerMap[peer.Index] = true
-		}
-		if len(peerMap) > c*3 {
-			break
-		}
-	}
-
-	return peers
-}
 
 func calcParticipant(vrfSeed vconfig.VRFValue, dposTable []uint32, k uint32) uint32 {
 	var v1, v2 uint32
@@ -187,7 +126,7 @@ func getCommitConsensus(commitMsgs []*blockCommitMsg, N int) (uint32, bool) {
 	return math.MaxUint32, false
 }
 
-func (self *Server) findBlockProposal(blkNum uint32, proposer uint32, forEmpty bool) *blockProposalMsg {
+func (self *Server) findBlockProposal(blkNum uint32, view uint32) *types.Block {
 	for _, p := range self.blockPool.getBlockProposals(blkNum) {
 		if p.Block.getProposer() == proposer {
 			return p
@@ -202,11 +141,6 @@ func (self *Server) findBlockProposal(blkNum uint32, proposer uint32, forEmpty b
 		}
 	}
 
-	return nil
-}
-
-func (self *Server) validateTxsInProposal(proposal *blockProposalMsg) error {
-	// TODO: add VBFT specific verifications
 	return nil
 }
 

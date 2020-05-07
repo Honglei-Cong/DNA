@@ -24,7 +24,6 @@ package poa
 import (
 	"bytes"
 	"crypto/sha256"
-	"crypto/sha512"
 	"encoding/json"
 	"fmt"
 
@@ -71,28 +70,6 @@ func HashMsg(msg ConsensusMsg) (common.Uint256, error) {
 	return hashData(data), nil
 }
 
-type seedData struct {
-	BlockNum          uint32 `json:"block_num"`
-	PrevBlockProposer uint32 `json:"prev_block_proposer"`
-	VrfValue          []byte `json:"vrf_value"`
-}
-
-func getParticipantSelectionSeed(block *Block) vconfig.VRFValue {
-
-	data, err := json.Marshal(&seedData{
-		BlockNum:          block.getBlockNum() + 1,
-		PrevBlockProposer: block.getProposer(),
-		VrfValue:          block.getVrfValue(),
-	})
-	if err != nil {
-		return vconfig.VRFValue{}
-	}
-
-	t := sha512.Sum512(data)
-	f := sha512.Sum512(t[:])
-	return vconfig.VRFValue(f)
-}
-
 type vrfData struct {
 	BlockNum uint32 `json:"block_num"`
 	View     uint32 `json:"view"`
@@ -130,97 +107,6 @@ func verifyVrf(pk keypair.PublicKey, blkNum, view uint32, prevVrf, newVrf, proof
 		return fmt.Errorf("verifyVrf failed")
 	}
 	return nil
-}
-
-func GetVbftConfigInfo(memdb *overlaydb.MemDB) (*config.VBFTConfig, error) {
-	//get governance view
-	goveranceview, err := GetGovernanceView(memdb)
-	if err != nil {
-		return nil, err
-	}
-
-	//get preConfig
-	preCfg := new(gov.PreConfig)
-	data, err := GetStorageValue(memdb, ledger.DefLedger, nutils.GovernanceContractAddress, []byte(gov.PRE_CONFIG))
-	if err != nil && err != scommon.ErrNotFound {
-		return nil, err
-	}
-	if data != nil {
-		err = preCfg.Deserialization(common.NewZeroCopySource(data))
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	chainconfig := new(config.VBFTConfig)
-	if preCfg.SetView == goveranceview.View {
-		chainconfig = &config.VBFTConfig{
-			N:                    uint32(preCfg.Configuration.N),
-			C:                    uint32(preCfg.Configuration.C),
-			K:                    uint32(preCfg.Configuration.K),
-			L:                    uint32(preCfg.Configuration.L),
-			BlockMsgDelay:        uint32(preCfg.Configuration.BlockMsgDelay),
-			HashMsgDelay:         uint32(preCfg.Configuration.HashMsgDelay),
-			PeerHandshakeTimeout: uint32(preCfg.Configuration.PeerHandshakeTimeout),
-			MaxBlockChangeView:   uint32(preCfg.Configuration.MaxBlockChangeView),
-		}
-	} else {
-		data, err := GetStorageValue(memdb, ledger.DefLedger, nutils.GovernanceContractAddress, []byte(gov.VBFT_CONFIG))
-		if err != nil {
-			return nil, err
-		}
-		cfg := new(gov.Configuration)
-		err = cfg.Deserialization(common.NewZeroCopySource(data))
-		if err != nil {
-			return nil, err
-		}
-		chainconfig = &config.VBFTConfig{
-			N:                    uint32(cfg.N),
-			C:                    uint32(cfg.C),
-			K:                    uint32(cfg.K),
-			L:                    uint32(cfg.L),
-			BlockMsgDelay:        uint32(cfg.BlockMsgDelay),
-			HashMsgDelay:         uint32(cfg.HashMsgDelay),
-			PeerHandshakeTimeout: uint32(cfg.PeerHandshakeTimeout),
-			MaxBlockChangeView:   uint32(cfg.MaxBlockChangeView),
-		}
-	}
-	return chainconfig, nil
-}
-
-func GetPeersConfig(memdb *overlaydb.MemDB) ([]*config.VBFTPeerStakeInfo, error) {
-	goveranceview, err := GetGovernanceView(memdb)
-	if err != nil {
-		return nil, err
-	}
-	viewBytes, err := gov.GetUint32Bytes(goveranceview.View)
-	if err != nil {
-		return nil, err
-	}
-	key := append([]byte(gov.PEER_POOL), viewBytes...)
-	data, err := GetStorageValue(memdb, ledger.DefLedger, nutils.GovernanceContractAddress, key)
-	if err != nil {
-		return nil, err
-	}
-	peerMap := &gov.PeerPoolMap{
-		PeerPoolMap: make(map[string]*gov.PeerPoolItem),
-	}
-	err = peerMap.Deserialization(common.NewZeroCopySource(data))
-	if err != nil {
-		return nil, err
-	}
-	var peerstakes []*config.VBFTPeerStakeInfo
-	for _, id := range peerMap.PeerPoolMap {
-		if id.Status == gov.CandidateStatus || id.Status == gov.ConsensusStatus {
-			config := &config.VBFTPeerStakeInfo{
-				Index:      uint32(id.Index),
-				PeerPubkey: id.PeerPubkey,
-				InitPos:    id.InitPos + id.TotalPos,
-			}
-			peerstakes = append(peerstakes, config)
-		}
-	}
-	return peerstakes, nil
 }
 
 func isUpdate(memdb *overlaydb.MemDB, view uint32) (bool, error) {
@@ -271,29 +157,6 @@ func GetGovernanceView(memdb *overlaydb.MemDB) (*gov.GovernanceView, error) {
 	return governanceView, nil
 }
 
-func getChainConfig(blkNum uint32) (*vconfig.ChainConfig, error) {
-	config, err := GetVbftConfigInfo(memdb)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get chainconfig from leveldb: %s", err)
-	}
-
-	peersinfo, err := GetPeersConfig(memdb)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peersinfo from leveldb: %s", err)
-	}
-	goverview, err := GetGovernanceView(memdb)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get governanceview failed:%s", err)
-	}
-
-	cfg, err := vconfig.GenesisChainConfig(config, peersinfo, goverview.TxHash, blkNum)
-	if err != nil {
-		return nil, fmt.Errorf("GenesisChainConfig failed: %s", err)
-	}
-	cfg.View = goverview.View
-	return cfg, err
-}
-
 type VrfSeedData struct {
 	BlockNum uint32 `json:"block_num"`
 	View     uint32 `json:"view"`
@@ -322,5 +185,19 @@ func getBlockLastConfigHeight(block *types.Block) (uint32, error) {
 		return 0, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
 	}
 	return blkInfo.LastConfigBlockNum, nil
+}
 
+func getBlockView(block *types.Block) (uint32, map[uint32][]byte, error) {
+	if block == nil {
+		return 0, nil, fmt.Errorf("nil block in getBlockView")
+	}
+
+	blkInfo := vconfig.VbftBlockInfo{}
+	if err := json.Unmarshal(block.Header.ConsensusPayload, blkInfo); err != nil {
+		return 0, nil, fmt.Errorf("unmarshal blockinfo (%d): %s", block.Header.Height, err)
+	}
+	if blkInfo.Round == nil {
+		return 0, nil, nil
+	}
+	return blkInfo.Round.Round, blkInfo.Round.ProofSigs, nil
 }

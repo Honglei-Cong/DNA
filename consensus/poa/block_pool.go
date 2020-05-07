@@ -22,21 +22,19 @@
 package poa
 
 import (
-	"errors"
-	"fmt"
-	"sync"
-
 	"crypto/sha512"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sync"
+
 	"github.com/DNAProject/DNA/common"
 	"github.com/DNAProject/DNA/common/log"
 	"github.com/DNAProject/DNA/consensus/vbft/config"
 	"github.com/DNAProject/DNA/core/store/overlaydb"
 	"github.com/DNAProject/DNA/core/types"
-	"math"
 )
-
-type BlockList []*Block
 
 var errBlockPoolNotReady = errors.New("block pool not ready to validate sub-chain in msg")
 var errDupProposal = errors.New("multi proposal from same proposer")
@@ -829,7 +827,7 @@ func (pool *BlockPool) getPendingTxLocked(node *BlockNode) (map[common.Uint256]b
 	pendingTxs := make(map[common.Uint256]bool)
 
 	startHeight := pool.getChainedBlockNumber()
-	for h := node.Height-1; h > startHeight; h-- {
+	for h := node.Height - 1; h > startHeight; h-- {
 		if node.Proposal == nil {
 			return nil, fmt.Errorf("failed to get proposal in blocknode (%d)", h)
 		}
@@ -844,4 +842,54 @@ func (pool *BlockPool) getPendingTxLocked(node *BlockNode) (map[common.Uint256]b
 	}
 
 	return pendingTxs, nil
+}
+
+func (pool *BlockPool) getLastPreparedView(height uint32) (uint32, *PrepareMsg) {
+	pool.lock.RLock()
+	defer pool.lock.RUnlock()
+
+	selfId := pool.server.Index
+	highestPreparedView := uint32(0)
+	var prepareMsg *PrepareMsg
+	for _, n := range pool.candidateBlocks[height] {
+		if msg, present := n.Prepare[selfId]; present {
+			if msg.Msg.View > highestPreparedView {
+				highestPreparedView = msg.Msg.View
+				prepareMsg = msg.Msg.Prepare
+			}
+			if prepareMsg == nil {
+				prepareMsg = msg.Msg.Prepare
+			}
+		}
+	}
+	if prepareMsg == nil {
+		return math.MaxUint32, nil
+	}
+
+	return highestPreparedView, prepareMsg
+}
+
+func (pool *BlockPool) getLastCommitView(height uint32) (uint32, *CommitMsg) {
+	pool.lock.RLock()
+	defer pool.lock.RUnlock()
+
+	selfId := pool.server.Index
+	highestCommitView := uint32(0)
+	var commitMsg *CommitMsg
+	for _, n := range pool.candidateBlocks[height] {
+		if msg, present := n.Prepare[selfId]; present {
+			if msg.Msg.View > highestCommitView {
+				highestCommitView = msg.Msg.View
+				commitMsg = msg.Msg.Commit
+			}
+			if commitMsg == nil {
+				commitMsg = msg.Msg.Commit
+			}
+		}
+	}
+	if commitMsg == nil {
+		return math.MaxUint32, nil
+	}
+
+	return highestCommitView, commitMsg
 }

@@ -433,13 +433,13 @@ func (msg *VoteMsg) Deserialize(source *common.ZeroCopySource) error {
 }
 
 type ChangeViewMsg struct {
-	NodeID     uint32     `json:"node_id"`
-	Height     uint32     `json:"height"`
-	NewView    uint32     `json:"new_view"`
-	LastHeight uint32     `json:"last_height"`
-	LastView   uint32     `json:"last_view"`
-	LastCommit *CommitMsg `json:"last_commit"`
-	Sig        []byte     `json:"sig"`
+	NodeID           uint32     `json:"node_id"`
+	Height           uint32     `json:"height"`
+	NewView          uint32     `json:"new_view"`
+	LastPreparedView uint32     `json:"last_prepared_view"` // last view which node has prepared for (max-uint32 if none)
+	LastCommitView   uint32     `json:"last_commit_view"`   // last view which node has committed for (max-uint32 if none)
+	LastCommit       *CommitMsg `json:"last_commit"`        // last commitment which node has constructed for
+	Sig              []byte     `json:"sig"`
 }
 
 func (msg *ChangeViewMsg) Type() MsgType {
@@ -592,6 +592,7 @@ func (msg *BlockInfoFetchMsg) Deserialize(source *common.ZeroCopySource) error {
 
 type BlockInfo_ struct {
 	BlockNum   uint32   `json:"block_num"`
+	Round      uint32   `json:"round"`
 	Signatures [][]byte `json:"signatures"`
 }
 
